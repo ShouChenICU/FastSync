@@ -73,7 +73,7 @@ fn plan_file(
     ensure_same_kind(source_entry, target_entry)?;
 
     match config.compare_mode {
-        CompareMode::Metadata => {
+        CompareMode::Fast => {
             if metadata_differs(source_entry, target_entry) {
                 plan.push(PlanOperation::CopyFile {
                     relative_path: source_entry.relative_path.clone(),
@@ -96,10 +96,7 @@ fn plan_file(
             }
         }
         CompareMode::Auto => {
-            if !metadata_differs(source_entry, target_entry) {
-                return Ok(());
-            }
-            if source_entry.len != target_entry.len {
+            if metadata_differs(source_entry, target_entry) {
                 plan.push(PlanOperation::CopyFile {
                     relative_path: source_entry.relative_path.clone(),
                     bytes: source_entry.len,
@@ -110,10 +107,6 @@ fn plan_file(
                     relative_path: source_entry.relative_path.clone(),
                     bytes: source_entry.len,
                     reason: CopyReason::ContentChanged,
-                });
-            } else {
-                plan.push(PlanOperation::SetMetadata {
-                    relative_path: source_entry.relative_path.clone(),
                 });
             }
         }

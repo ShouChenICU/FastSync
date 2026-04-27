@@ -1,11 +1,22 @@
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use fastsync::cli::Cli;
 use fastsync::config::{OutputMode, SyncConfig};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> ExitCode {
+    if std::env::args_os().len() == 1 {
+        let mut command = Cli::command();
+        if let Err(error) = command.print_long_help() {
+            eprintln!("fastsync: 输出帮助失败: {error}");
+            return ExitCode::from(1);
+        }
+        println!();
+        return ExitCode::SUCCESS;
+    }
+
     let cli = Cli::parse();
     init_tracing(&cli);
 
@@ -22,7 +33,9 @@ fn main() -> ExitCode {
         Ok(summary) => {
             match output {
                 OutputMode::Text => {
-                    println!("{}", summary.to_text());
+                    let use_color =
+                        std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+                    println!("{}", summary.to_text_with_color(use_color));
                 }
                 OutputMode::Json => match serde_json::to_string_pretty(&summary) {
                     Ok(json) => println!("{json}"),

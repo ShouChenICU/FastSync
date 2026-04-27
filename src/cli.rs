@@ -17,11 +17,11 @@ pub struct Cli {
     pub target: PathBuf,
 
     /// 只生成计划与摘要，不实际修改目标目录。
-    #[arg(long)]
+    #[arg(short = 'n', long)]
     pub dry_run: bool,
 
     /// 删除目标端源目录中不存在的多余项。默认关闭，避免误删。
-    #[arg(long)]
+    #[arg(short = 'd', long)]
     pub delete: bool,
 
     /// 遍历时跟随符号链接。默认关闭。
@@ -29,10 +29,14 @@ pub struct Cli {
     pub follow_symlinks: bool,
 
     /// 文件比较策略。
-    #[arg(long, value_enum, default_value_t = CompareMode::Auto)]
+    #[arg(short = 'c', long, value_enum, default_value_t = CompareMode::Hash)]
     pub compare: CompareMode,
 
-    /// 内容校验哈希算法。当前 MVP 支持 BLAKE3。
+    /// fast 比较模式的快捷方式：只比较修改时间、大小和支持的平台权限元数据。
+    #[arg(long, conflicts_with = "compare")]
+    pub fast: bool,
+
+    /// 内容校验哈希算法。当前支持 BLAKE3。
     #[arg(long, value_enum, default_value_t = HashAlgorithm::Blake3)]
     pub hash: HashAlgorithm,
 
@@ -53,11 +57,11 @@ pub struct Cli {
     pub atomic_write: bool,
 
     /// worker 线程数，可传数字或 auto。
-    #[arg(long, default_value = "auto")]
+    #[arg(short = 't', long, default_value = "auto")]
     pub threads: Option<String>,
 
     /// 有界任务队列长度，默认 threads * 4。
-    #[arg(long)]
+    #[arg(short = 'q', long)]
     pub queue_size: Option<usize>,
 
     /// 最大允许错误数，达到阈值后中止。
@@ -69,11 +73,11 @@ pub struct Cli {
     pub stop_on_error: bool,
 
     /// 日志级别。
-    #[arg(long, value_enum, default_value_t = LogLevel::Info)]
+    #[arg(short = 'l', long, value_enum, default_value_t = LogLevel::Info)]
     pub log_level: LogLevel,
 
     /// 摘要输出格式。
-    #[arg(long, value_enum, default_value_t = OutputMode::Text)]
+    #[arg(short = 'o', long, value_enum, default_value_t = OutputMode::Text)]
     pub output: OutputMode,
 }
 
@@ -87,7 +91,8 @@ impl Cli {
             dry_run: false,
             delete: false,
             follow_symlinks: false,
-            compare: CompareMode::Auto,
+            compare: CompareMode::Hash,
+            fast: false,
             hash: HashAlgorithm::Blake3,
             verify: VerifyMode::Changed,
             preserve_times: PreserveMode::Auto,

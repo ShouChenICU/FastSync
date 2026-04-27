@@ -9,7 +9,7 @@ use tracing::{debug, info};
 
 use crate::config::SyncConfig;
 use crate::error::{FastSyncError, Result, io_context};
-use crate::plan::{PlanOperation, SyncPlan};
+use crate::plan::{CopyReason, PlanOperation, SyncPlan};
 use crate::summary::SyncSummary;
 use crate::verify::verify_file;
 
@@ -17,8 +17,14 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 enum WorkerTask {
-    CopyFile { relative_path: PathBuf, bytes: u64 },
-    SetMetadata { relative_path: PathBuf },
+    CopyFile {
+        relative_path: PathBuf,
+        bytes: u64,
+        reason: CopyReason,
+    },
+    SetMetadata {
+        relative_path: PathBuf,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -59,10 +65,11 @@ pub fn execute_plan(config: &SyncConfig, plan: &SyncPlan) -> Result<SyncSummary>
             PlanOperation::CopyFile {
                 relative_path,
                 bytes,
-                ..
+                reason,
             } => worker_tasks.push(WorkerTask::CopyFile {
                 relative_path: relative_path.clone(),
                 bytes: *bytes,
+                reason: *reason,
             }),
             PlanOperation::SetMetadata { relative_path } => {
                 worker_tasks.push(WorkerTask::SetMetadata {
@@ -92,7 +99,7 @@ pub fn execute_plan(config: &SyncConfig, plan: &SyncPlan) -> Result<SyncSummary>
                 summary.deleted_dirs += 1;
             }
             PlanOperation::DeleteSymlink { relative_path } => {
-                delete_file(&config.target, &relative_path)?;
+                delete_symlink(&config.target, &relative_path)?;
                 summary.deleted_symlinks += 1;
             }
             _ => {}
@@ -171,7 +178,8 @@ fn worker_loop(
             WorkerTask::CopyFile {
                 relative_path,
                 bytes,
-            } => copy_one_file(config, &relative_path, bytes, &mut report),
+                reason,
+            } => copy_one_file(config, &relative_path, bytes, reason, &mut report),
             WorkerTask::SetMetadata { relative_path } => {
                 apply_file_metadata(config, &relative_path).map(|_| {
                     report.metadata_updates += 1;
@@ -229,19 +237,22 @@ fn copy_one_file(
     config: &SyncConfig,
     relative_path: &Path,
     bytes: u64,
+    reason: CopyReason,
     report: &mut WorkerReport,
 ) -> Result<()> {
     let source = config.source.join(relative_path);
     let target = config.target.join(relative_path);
 
-    if config.atomic_write {
+    if reason == CopyReason::Missing {
+        copy_file_direct(&source, &target)?;
+    } else if config.atomic_write {
         copy_file_atomic(&source, &target)?;
     } else {
         copy_file_direct(&source, &target)?;
     }
     apply_file_metadata(config, relative_path)?;
 
-    if config.verify_mode.verify_changed_files() {
+    if reason != CopyReason::Missing && config.verify_mode.verify_changed_files() {
         verify_file(&source, &target, relative_path)?;
         report.verified_files += 1;
     }
@@ -265,7 +276,9 @@ fn delete_file(target_root: &Path, relative_path: &Path) -> Result<()> {
     io_context(
         format!("删除文件: {}", path.display()),
         fs::remove_file(path),
-    )
+    )?;
+    info!(path = %relative_path.display(), "文件删除完成");
+    Ok(())
 }
 
 fn delete_directory(target_root: &Path, relative_path: &Path) -> Result<()> {
@@ -273,7 +286,19 @@ fn delete_directory(target_root: &Path, relative_path: &Path) -> Result<()> {
     io_context(
         format!("删除目录: {}", path.display()),
         fs::remove_dir(path),
-    )
+    )?;
+    info!(path = %relative_path.display(), "目录删除完成");
+    Ok(())
+}
+
+fn delete_symlink(target_root: &Path, relative_path: &Path) -> Result<()> {
+    let path = target_root.join(relative_path);
+    io_context(
+        format!("删除符号链接: {}", path.display()),
+        fs::remove_file(path),
+    )?;
+    info!(path = %relative_path.display(), "符号链接删除完成");
+    Ok(())
 }
 
 fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {

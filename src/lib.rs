@@ -93,6 +93,7 @@ mod tests {
 
         assert_eq!(fs::read_to_string(target.path().join("a.txt"))?, "hello");
         assert_eq!(summary.copied_files, 1);
+        assert_eq!(summary.verified_files, 0);
         assert_eq!(summary.errors, 0);
         Ok(())
     }
@@ -134,6 +135,57 @@ mod tests {
             "new-value"
         );
         assert_eq!(summary.copied_files, 1);
+        assert_eq!(summary.verified_files, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn auto_compare_hashes_when_metadata_matches()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        let source_file = source.path().join("a.txt");
+        let target_file = target.path().join("a.txt");
+        fs::write(&source_file, "new-value")?;
+        fs::write(&target_file, "old-value")?;
+
+        let timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source_file, timestamp)?;
+        filetime::set_file_mtime(&target_file, timestamp)?;
+
+        let mut cli = Cli::for_test(source.path(), target.path());
+        cli.compare = crate::config::CompareMode::Auto;
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(fs::read_to_string(target_file)?, "new-value");
+        assert_eq!(summary.copied_files, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn fast_compare_trusts_same_size_and_modified_time()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        let source_file = source.path().join("a.txt");
+        let target_file = target.path().join("a.txt");
+        fs::write(&source_file, "new-value")?;
+        fs::write(&target_file, "old-value")?;
+
+        let timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source_file, timestamp)?;
+        filetime::set_file_mtime(&target_file, timestamp)?;
+
+        let mut cli = Cli::for_test(source.path(), target.path());
+        cli.fast = true;
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(fs::read_to_string(target_file)?, "old-value");
+        assert_eq!(summary.copied_files, 0);
         Ok(())
     }
 
