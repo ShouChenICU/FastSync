@@ -38,6 +38,7 @@ pub enum PlanOperation {
 pub struct SyncPlan {
     pub operations: Vec<PlanOperation>,
     pub bytes_to_copy: u64,
+    pub blake3_compared_files: usize,
 }
 
 impl SyncPlan {
@@ -47,5 +48,10 @@ impl SyncPlan {
             self.bytes_to_copy = self.bytes_to_copy.saturating_add(bytes);
         }
         self.operations.push(operation);
+    }
+
+    /// 记录比较阶段执行过一次 BLAKE3 内容比较。
+    pub fn record_blake3_comparison(&mut self) {
+        self.blake3_compared_files = self.blake3_compared_files.saturating_add(1);
     }
 }

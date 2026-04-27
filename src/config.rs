@@ -8,12 +8,10 @@ use crate::error::{FastSyncError, Result};
 /// 文件内容比较策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CompareMode {
-    /// 先比较元数据；元数据一致时再使用 BLAKE3 确认内容。
-    Auto,
-    /// 只比较修改时间、大小和支持的平台权限元数据，速度快但可靠性较弱。
+    /// 元数据一致时信任元数据；元数据不一致但大小一致时再使用 BLAKE3 确认内容。
     Fast,
-    /// 对已存在的同名文件统一执行 BLAKE3 内容比较。
-    Hash,
+    /// 大小一致时始终使用 BLAKE3 确认内容，即使元数据一致。
+    Strict,
 }
 
 /// 复制后验证强度。
@@ -113,6 +111,7 @@ pub struct SyncConfig {
     pub compare_mode: CompareMode,
     pub hash_algorithm: HashAlgorithm,
     pub verify_mode: VerifyMode,
+    pub sync_metadata: bool,
     pub preserve_times: PreserveMode,
     pub preserve_permissions: PreserveMode,
     pub atomic_write: bool,
@@ -122,6 +121,13 @@ pub struct SyncConfig {
     pub stop_on_error: bool,
     pub output: OutputMode,
     pub log_level: LogLevel,
+}
+
+impl SyncConfig {
+    /// 判断是否需要为同名文件生成独立的元数据同步任务。
+    pub fn syncs_file_metadata(&self) -> bool {
+        self.sync_metadata && (self.preserve_times.enabled() || self.preserve_permissions.enabled())
+    }
 }
 
 impl TryFrom<Cli> for SyncConfig {
@@ -144,8 +150,8 @@ impl TryFrom<Cli> for SyncConfig {
         .max(1);
 
         let queue_size = cli.queue_size.unwrap_or_else(|| threads * 4).max(1);
-        let compare_mode = if cli.fast {
-            CompareMode::Fast
+        let compare_mode = if cli.strict {
+            CompareMode::Strict
         } else {
             cli.compare
         };
@@ -159,6 +165,7 @@ impl TryFrom<Cli> for SyncConfig {
             compare_mode,
             hash_algorithm: cli.hash,
             verify_mode: cli.verify,
+            sync_metadata: cli.sync_metadata,
             preserve_times: cli.preserve_times,
             preserve_permissions: cli.preserve_permissions,
             atomic_write: cli.atomic_write,

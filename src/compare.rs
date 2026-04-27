@@ -72,47 +72,60 @@ fn plan_file(
 
     ensure_same_kind(source_entry, target_entry)?;
 
-    match config.compare_mode {
-        CompareMode::Fast => {
-            if metadata_differs(source_entry, target_entry) {
-                plan.push(PlanOperation::CopyFile {
-                    relative_path: source_entry.relative_path.clone(),
-                    bytes: source_entry.len,
-                    reason: CopyReason::MetadataChanged,
-                });
-            }
-        }
-        CompareMode::Hash => {
-            if !same_blake3(&source_entry.absolute_path, &target_entry.absolute_path)? {
-                plan.push(PlanOperation::CopyFile {
-                    relative_path: source_entry.relative_path.clone(),
-                    bytes: source_entry.len,
-                    reason: CopyReason::ContentChanged,
-                });
-            } else if metadata_differs(source_entry, target_entry) {
-                plan.push(PlanOperation::SetMetadata {
-                    relative_path: source_entry.relative_path.clone(),
-                });
-            }
-        }
-        CompareMode::Auto => {
-            if metadata_differs(source_entry, target_entry) {
-                plan.push(PlanOperation::CopyFile {
-                    relative_path: source_entry.relative_path.clone(),
-                    bytes: source_entry.len,
-                    reason: CopyReason::MetadataChanged,
-                });
-            } else if !same_blake3(&source_entry.absolute_path, &target_entry.absolute_path)? {
-                plan.push(PlanOperation::CopyFile {
-                    relative_path: source_entry.relative_path.clone(),
-                    bytes: source_entry.len,
-                    reason: CopyReason::ContentChanged,
-                });
-            }
-        }
+    if let Some(reason) = content_change_reason(config, source_entry, target_entry, plan)? {
+        plan.push(PlanOperation::CopyFile {
+            relative_path: source_entry.relative_path.clone(),
+            bytes: source_entry.len,
+            reason,
+        });
+    } else if config.syncs_file_metadata()
+        && sync_metadata_differs(config, source_entry, target_entry)
+    {
+        plan.push(PlanOperation::SetMetadata {
+            relative_path: source_entry.relative_path.clone(),
+        });
     }
 
     Ok(())
+}
+
+fn content_change_reason(
+    config: &SyncConfig,
+    source_entry: &FileEntry,
+    target_entry: &FileEntry,
+    plan: &mut SyncPlan,
+) -> Result<Option<CopyReason>> {
+    match config.compare_mode {
+        CompareMode::Fast => {
+            if !content_metadata_differs(source_entry, target_entry) {
+                Ok(None)
+            } else if source_entry.len != target_entry.len {
+                Ok(Some(CopyReason::MetadataChanged))
+            } else if same_content_by_blake3(source_entry, target_entry, plan)? {
+                Ok(None)
+            } else {
+                Ok(Some(CopyReason::ContentChanged))
+            }
+        }
+        CompareMode::Strict => {
+            if source_entry.len != target_entry.len {
+                Ok(Some(CopyReason::MetadataChanged))
+            } else if same_content_by_blake3(source_entry, target_entry, plan)? {
+                Ok(None)
+            } else {
+                Ok(Some(CopyReason::ContentChanged))
+            }
+        }
+    }
+}
+
+fn same_content_by_blake3(
+    source_entry: &FileEntry,
+    target_entry: &FileEntry,
+    plan: &mut SyncPlan,
+) -> Result<bool> {
+    plan.record_blake3_comparison();
+    same_blake3(&source_entry.absolute_path, &target_entry.absolute_path)
 }
 
 fn ensure_same_kind(source: &FileEntry, target: &FileEntry) -> Result<()> {
@@ -127,18 +140,32 @@ fn ensure_same_kind(source: &FileEntry, target: &FileEntry) -> Result<()> {
     })
 }
 
-fn metadata_differs(source: &FileEntry, target: &FileEntry) -> bool {
+fn content_metadata_differs(source: &FileEntry, target: &FileEntry) -> bool {
     source.len != target.len
         || source.modified != target.modified
-        || source.readonly != target.readonly
-        || {
-            #[cfg(unix)]
-            {
-                source.mode != target.mode
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        }
+        || permission_metadata_differs(source, target)
+}
+
+fn sync_metadata_differs(config: &SyncConfig, source: &FileEntry, target: &FileEntry) -> bool {
+    let time_differs = config.preserve_times.enabled() && source.modified != target.modified;
+    let permission_differs =
+        config.preserve_permissions.enabled() && permission_metadata_differs(source, target);
+
+    time_differs || permission_differs
+}
+
+fn permission_metadata_differs(source: &FileEntry, target: &FileEntry) -> bool {
+    source.readonly != target.readonly || platform_permissions_differ(source, target)
+}
+
+fn platform_permissions_differ(source: &FileEntry, target: &FileEntry) -> bool {
+    #[cfg(unix)]
+    {
+        source.mode != target.mode
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (source, target);
+        false
+    }
 }

@@ -1,0 +1,12 @@
+{
+  "rust-analyzer.cargo.allFeatures": true,
+  "rust-analyzer.check.allTargets": true,
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.extraArgs": ["--", "-D", "warnings"],
+  "rust-analyzer.procMacro.enable": false,
+  "rust-analyzer.diagnostics.disabled": [
+    "proc-macro-error",
+    "proc-macro-disabled",
+    "unresolved-proc-macro"
+  ]
+}

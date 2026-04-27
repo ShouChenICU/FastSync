@@ -7,7 +7,8 @@
 Mirror a source folder into a target folder with speed, clear previews, and safer overwrite behavior.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Edition](https://img.shields.io/badge/Edition-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
 [![BLAKE3](https://img.shields.io/badge/Compare-BLAKE3-brightgreen.svg)](https://github.com/BLAKE3-team/BLAKE3)
 [![GitHub](https://img.shields.io/badge/GitHub-ShouChenICU%2FFastSync-black.svg)](https://github.com/ShouChenICU/FastSync)
 
@@ -15,8 +16,8 @@ Mirror a source folder into a target folder with speed, clear previews, and safe
 
 </div>
 
-| Fast | Predictable | Protects existing files |
-| --- | --- | --- |
+| Fast                                                        | Predictable                                          | Protects existing files                                   |
+| ----------------------------------------------------------- | ---------------------------------------------------- | --------------------------------------------------------- |
 | Rust, metadata-aware comparison, BLAKE3, concurrent workers | Dry-run first, explicit deletion, readable summaries | Avoids leaving corrupted partial files after interruption |
 
 ## ✨ Why FastSync?
@@ -43,16 +44,16 @@ flowchart LR
 
 Directory sync is a mix of filesystem latency, metadata checks, hashing, and copying. FastSync keeps those stages explicit and controlled.
 
-| Performance choice | How it helps |
-| --- | --- |
-| Rust implementation | Native binary performance with predictable memory and CPU behavior. |
-| Metadata-aware comparison | Uses file size, modified time, and supported permission bits to quickly classify files. |
-| BLAKE3 hashing | Uses a very fast modern hash for strong content comparison when needed. |
-| Bounded worker queue | Keeps copying concurrent without letting memory usage grow without control. |
-| Direct new-file copy | Files missing from the target are copied directly, avoiding unnecessary temporary rename overhead. |
+| Performance choice        | How it helps                                                                                                                         |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Rust implementation       | Native binary performance with predictable memory and CPU behavior.                                                                  |
+| Metadata-aware comparison | Uses file size and modified time where they are valid content signals, while metadata synchronization stays separately configurable. |
+| BLAKE3 hashing            | Uses a very fast modern hash for strong content comparison when needed.                                                              |
+| Bounded worker queue      | Keeps copying concurrent without letting memory usage grow without control.                                                          |
+| Direct new-file copy      | Files missing from the target are copied directly, avoiding unnecessary temporary rename overhead.                                   |
 
 > [!NOTE]
-> `--fast` switches to metadata-only comparison when speed matters more than content-level certainty.
+> Fast comparison is the default. Use `--strict` when same-metadata files should still be confirmed with BLAKE3.
 
 ## 🚀 Quick Start
 
@@ -80,6 +81,13 @@ fastsync -d ./source ./target
 
 ## 📦 Install
 
+FastSync uses the Rust 2024 edition and requires Rust 1.85 or newer. With `rustup`, use the stable toolchain:
+
+```bash
+rustup default stable
+rustup component add rust-src
+```
+
 ### Build from source
 
 ```bash
@@ -97,14 +105,14 @@ cargo install --git https://github.com/ShouChenICU/FastSync
 
 ## 🧭 Common Workflows
 
-| Goal | Command |
-| --- | --- |
-| Preview a sync | `fastsync -n ./source ./target` |
-| Sync one folder into another | `fastsync ./source ./target` |
-| Sync and delete stale target files | `fastsync -d ./source ./target` |
-| Use metadata-only fast mode | `fastsync --fast ./source ./target` |
-| Limit worker threads | `fastsync -t 4 ./source ./target` |
-| Output JSON for scripts | `fastsync -o json ./source ./target` |
+| Goal                               | Command                               |
+| ---------------------------------- | ------------------------------------- |
+| Preview a sync                     | `fastsync -n ./source ./target`       |
+| Sync one folder into another       | `fastsync ./source ./target`          |
+| Sync and delete stale target files | `fastsync -d ./source ./target`       |
+| Use strict comparison              | `fastsync --strict ./source ./target` |
+| Limit worker threads               | `fastsync -t 4 ./source ./target`     |
+| Output JSON for scripts            | `fastsync -o json ./source ./target`  |
 
 <details>
 <summary><strong>Example: safe backup mirror</strong></summary>
@@ -123,63 +131,68 @@ fastsync -d ~/Photos /mnt/backup/Photos
 <summary><strong>Example: fast cache mirror</strong></summary>
 
 ```bash
-fastsync --fast ./target/release ./cache/release
+fastsync ./target/release ./cache/release
 ```
 
-Use this only when metadata is a good enough signal for your files.
+The default fast mode trusts matching metadata, then hashes only when same-size files have differing modified times or supported permissions.
 
 </details>
 
 ## 🛡️ Safety First By Default
 
-| Default | Why it matters |
-| --- | --- |
-| One-way sync | The source is the authority; the target follows it. |
-| No implicit deletion | Target-only files are preserved unless `--delete` is used. |
-| BLAKE3 comparison | Existing files are checked by content by default. |
+| Default                  | Why it matters                                                                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| One-way sync             | The source is the authority; the target follows it.                                                                                                    |
+| No implicit deletion     | Target-only files are preserved unless `--delete` is used.                                                                                             |
+| Fast comparison          | Existing files trust matching metadata by default, and use BLAKE3 only for same-size files whose metadata differs.                                     |
 | Temporary-file overwrite | Existing targets are written to a temporary filename first, then renamed into place, reducing the chance of leaving a partial file after interruption. |
-| Direct new-file copy | Missing target files are copied directly, without unnecessary rename overhead. |
-| Dry-run support | You can inspect the plan before changing anything. |
+| Direct new-file copy     | Missing target files are copied directly, without unnecessary rename overhead.                                                                         |
+| Dry-run support          | You can inspect the plan before changing anything.                                                                                                     |
 
 ## 🔍 Choose A Comparison Mode
 
-| Mode | Behavior | Use when |
-| --- | --- | --- |
-| `hash` | Compares existing files with BLAKE3. This is the default. | You want the safest general-purpose behavior. |
-| `auto` | Checks metadata first; if metadata matches, confirms content with BLAKE3. | You want metadata screening with content confirmation. |
-| `fast` | Checks only modified time, size, and supported permission bits. | You need speed and accept metadata-only risk. |
+| Mode     | Behavior                                                                                                                                                                        | Use when                                                             |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `fast`   | If metadata matches, treats the file as unchanged. If metadata differs, size differences are changed immediately; same-size files are checked with BLAKE3. This is the default. | You want good speed while still hashing ambiguous same-size changes. |
+| `strict` | If sizes match, checks content with BLAKE3 even when metadata also matches.                                                                                                     | You want content confirmation for every existing same-size file.     |
 
-`--fast` is a shortcut for `--compare fast`.
+`--strict` is a shortcut for `--compare strict`.
 
 > [!IMPORTANT]
-> Fast mode can miss content changes when size, modified time, and permissions stay the same. Use the default `hash` mode for important data.
+> Fast mode can miss content changes when size, modified time, and supported permissions stay the same. Use `strict` for important data that needs content confirmation even when metadata matches.
+
+Same-name file metadata synchronization is separate from content comparison and is enabled by default. Use `--no-sync-metadata` to skip standalone metadata updates, or `--preserve-times false` and/or `--preserve-permissions false` to narrow which metadata is preserved.
 
 ## ✅ Verification
 
 Post-copy verification is controlled by `--verify`:
 
-| Mode | Behavior |
-| --- | --- |
-| `none` | Do not verify after copying. |
+| Mode      | Behavior                                       |
+| --------- | ---------------------------------------------- |
+| `none`    | Do not verify after copying.                   |
 | `changed` | Verify overwritten files. This is the default. |
-| `all` | Verify all regular source files after sync. |
+| `all`     | Verify all regular source files after sync.    |
 
+The summary reports BLAKE3 content checks in two separate counters: comparison-time checks used by `fast` or `strict`, and post-copy verifications controlled by `--verify`.
 New files that do not exist in the target are copied directly and are not counted as post-copy BLAKE3 verifications.
 
 ## 🧾 CLI Cheat Sheet
 
-| Option | Meaning |
-| --- | --- |
-| `-n`, `--dry-run` | Preview only; do not modify the target. |
-| `-d`, `--delete` | Delete target entries that no longer exist in the source. |
-| `--fast` | Use metadata-only comparison. |
-| `-c`, `--compare <auto\|fast\|hash>` | Select the comparison strategy. |
-| `--verify <none\|changed\|all>` | Select post-copy verification. |
-| `-t`, `--threads <N\|auto>` | Set the worker count. |
-| `-q`, `--queue-size <N>` | Set the bounded task queue size. |
-| `--no-atomic-write` | Disable temporary-file overwrite writes. |
-| `-o`, `--output <text\|json>` | Select summary format. |
-| `-l`, `--log-level <level>` | Set log verbosity. |
+| Option                                       | Meaning                                                                   |
+| -------------------------------------------- | ------------------------------------------------------------------------- |
+| `-n`, `--dry-run`                            | Preview only; do not modify the target.                                   |
+| `-d`, `--delete`                             | Delete target entries that no longer exist in the source.                 |
+| `--strict`                                   | Use strict BLAKE3 confirmation for same-size existing files.              |
+| `-c`, `--compare <fast\|strict>`             | Select the comparison strategy.                                           |
+| `--no-sync-metadata`                         | Do not update metadata for same-name files whose content already matches. |
+| `--preserve-times <auto\|true\|false>`       | Control timestamp synchronization.                                        |
+| `--preserve-permissions <auto\|true\|false>` | Control permission synchronization.                                       |
+| `--verify <none\|changed\|all>`              | Select post-copy verification.                                            |
+| `-t`, `--threads <N\|auto>`                  | Set the worker count.                                                     |
+| `-q`, `--queue-size <N>`                     | Set the bounded task queue size.                                          |
+| `--no-atomic-write`                          | Disable temporary-file overwrite writes.                                  |
+| `-o`, `--output <text\|json>`                | Select summary format.                                                    |
+| `-l`, `--log-level <level>`                  | Set log verbosity.                                                        |
 
 Print the full help page:
 
@@ -190,6 +203,8 @@ fastsync --help
 Running `fastsync` without arguments also prints help.
 
 ## 🧪 Development
+
+This crate sets `edition = "2024"` in `Cargo.toml`. That is the Rust edition name, not the current calendar year; Rust editions are opt-in language compatibility milestones, and the 2024 edition remains current even when building in 2026.
 
 ```bash
 cargo fmt --check
@@ -216,9 +231,9 @@ No. Deletion only happens when `--delete` or `-d` is provided.
 </details>
 
 <details>
-<summary><strong>Should I use <code>--fast</code>?</strong></summary>
+<summary><strong>Should I use <code>--strict</code>?</strong></summary>
 
-Use it for generated files, caches, build outputs, or low-risk folders where metadata is reliable enough. For important personal or production data, prefer the default `hash` mode.
+Use it for important personal or production data where matching metadata is not enough confidence. For generated files, caches, and build outputs, the default `fast` mode is usually the better tradeoff.
 
 </details>
 

@@ -7,7 +7,8 @@
 把源目录镜像到目标目录：速度快、可预览、覆盖已有文件时更稳妥。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Edition](https://img.shields.io/badge/Edition-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
 [![BLAKE3](https://img.shields.io/badge/Compare-BLAKE3-brightgreen.svg)](https://github.com/BLAKE3-team/BLAKE3)
 [![GitHub](https://img.shields.io/badge/GitHub-ShouChenICU%2FFastSync-black.svg)](https://github.com/ShouChenICU/FastSync)
 
@@ -15,8 +16,8 @@
 
 </div>
 
-| 快 | 可预期 | 避免文件损坏 |
-| --- | --- | --- |
+| 快                                    | 可预期                     | 避免文件损坏                       |
+| ------------------------------------- | -------------------------- | ---------------------------------- |
 | Rust、元数据优先、BLAKE3、并发 worker | 先预览、显式删除、摘要清晰 | 降低意外中断后留下不完整文件的风险 |
 
 ## ✨ 为什么选择 FastSync？
@@ -43,16 +44,16 @@ flowchart LR
 
 目录同步通常混合了文件系统延迟、元数据判断、哈希计算和真实复制。FastSync 将这些阶段保持得清晰、可控。
 
-| 性能设计 | 作用 |
-| --- | --- |
-| Rust 实现 | 原生执行性能，内存和 CPU 行为更可预期。 |
-| 元数据感知比较 | 通过大小、修改时间和支持的平台权限位快速分类文件。 |
-| BLAKE3 哈希 | 在需要内容确认时，用高速现代哈希算法完成强比较。 |
-| 有界 worker 队列 | 并发复制，同时避免任务无限堆积导致内存失控。 |
-| 新文件直接复制 | 目标端不存在的新文件直接写入，避免不必要的临时文件重命名开销。 |
+| 性能设计         | 作用                                                                     |
+| ---------------- | ------------------------------------------------------------------------ |
+| Rust 实现        | 原生执行性能，内存和 CPU 行为更可预期。                                  |
+| 元数据感知比较   | 在大小、修改时间适合作为内容信号时用于快速判断，元数据同步保持独立配置。 |
+| BLAKE3 哈希      | 在需要内容确认时，用高速现代哈希算法完成强比较。                         |
+| 有界 worker 队列 | 并发复制，同时避免任务无限堆积导致内存失控。                             |
+| 新文件直接复制   | 目标端不存在的新文件直接写入，避免不必要的临时文件重命名开销。           |
 
 > [!NOTE]
-> `--fast` 会切换到只看元数据的比较方式，适合更看重速度的场景。
+> 快速比较是默认模式。需要在元数据一致时也用 BLAKE3 确认内容时，可以使用 `--strict`。
 
 ## 🚀 快速开始
 
@@ -80,6 +81,13 @@ fastsync -d ./source ./target
 
 ## 📦 安装
 
+FastSync 使用 Rust 2024 edition，要求 Rust 1.85 或更新版本。如果使用 `rustup`，建议使用稳定工具链：
+
+```bash
+rustup default stable
+rustup component add rust-src
+```
+
 ### 从源码构建
 
 ```bash
@@ -97,14 +105,14 @@ cargo install --git https://github.com/ShouChenICU/FastSync
 
 ## 🧭 常见场景
 
-| 目标 | 命令 |
-| --- | --- |
-| 预览同步 | `fastsync -n ./source ./target` |
-| 将一个目录同步到另一个目录 | `fastsync ./source ./target` |
-| 同步并删除目标端陈旧项目 | `fastsync -d ./source ./target` |
-| 使用只看元数据的快速模式 | `fastsync --fast ./source ./target` |
-| 限制 worker 线程数 | `fastsync -t 4 ./source ./target` |
-| 为脚本输出 JSON | `fastsync -o json ./source ./target` |
+| 目标                       | 命令                                  |
+| -------------------------- | ------------------------------------- |
+| 预览同步                   | `fastsync -n ./source ./target`       |
+| 将一个目录同步到另一个目录 | `fastsync ./source ./target`          |
+| 同步并删除目标端陈旧项目   | `fastsync -d ./source ./target`       |
+| 使用严格比较模式           | `fastsync --strict ./source ./target` |
+| 限制 worker 线程数         | `fastsync -t 4 ./source ./target`     |
+| 为脚本输出 JSON            | `fastsync -o json ./source ./target`  |
 
 <details>
 <summary><strong>示例：安全地同步照片备份</strong></summary>
@@ -123,63 +131,68 @@ fastsync -d ~/Photos /mnt/backup/Photos
 <summary><strong>示例：快速同步构建缓存</strong></summary>
 
 ```bash
-fastsync --fast ./target/release ./cache/release
+fastsync ./target/release ./cache/release
 ```
 
-仅在你确定“元数据足够可靠”的目录中使用这种模式。
+默认快速模式会信任完全一致的元数据；只有同大小文件的修改时间或支持的权限不一致时，才会用 BLAKE3 确认内容。
 
 </details>
 
 ## 🛡️ 默认安全模型
 
-| 默认行为 | 为什么重要 |
-| --- | --- |
-| 单向同步 | 源目录是权威数据，目标目录跟随源目录。 |
-| 不隐式删除 | 不传 `--delete` 时，目标端额外文件会被保留。 |
-| BLAKE3 内容比较 | 两端已有文件默认按内容判断是否变化。 |
+| 默认行为         | 为什么重要                                                                             |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| 单向同步         | 源目录是权威数据，目标目录跟随源目录。                                                 |
+| 不隐式删除       | 不传 `--delete` 时，目标端额外文件会被保留。                                           |
+| 快速内容比较     | 两端已有文件默认信任一致的元数据；同大小但元数据不一致时才用 BLAKE3 确认内容。         |
 | 临时文件覆盖写入 | 覆盖已有文件时，默认先写入临时文件名，再重命名到目标路径，降低中断后留下半文件的风险。 |
-| 新文件直接复制 | 目标端不存在的新文件直接复制，避免不必要的重命名开销。 |
-| 支持预览模式 | 可以在修改目标目录前查看计划。 |
+| 新文件直接复制   | 目标端不存在的新文件直接复制，避免不必要的重命名开销。                                 |
+| 支持预览模式     | 可以在修改目标目录前查看计划。                                                         |
 
 ## 🔍 选择比较模式
 
-| 模式 | 行为 | 适合场景 |
-| --- | --- | --- |
-| `hash` | 使用 BLAKE3 比较两端已有文件，默认模式。 | 重要数据和一般使用场景。 |
-| `auto` | 先比较元数据；元数据一致时，再用 BLAKE3 确认内容。 | 希望先用元数据筛选，同时保留内容确认。 |
-| `fast` | 只比较修改时间、大小和支持的平台权限位。 | 低风险目录，优先追求速度。 |
+| 模式     | 行为                                                                                                           | 适合场景                                         |
+| -------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `fast`   | 元数据一致时认为文件一致；元数据不一致时，大小不同直接认为内容不一致，大小相同再用 BLAKE3 确认内容。默认模式。 | 希望保持速度，同时对同大小的可疑变化做内容确认。 |
+| `strict` | 大小一致时始终使用 BLAKE3 确认内容，即使元数据也一致。                                                         | 重要数据，需要元数据一致时也做内容确认。         |
 
-`--fast` 是 `--compare fast` 的快捷方式。
+`--strict` 是 `--compare strict` 的快捷方式。
 
 > [!IMPORTANT]
-> 快速模式可能漏掉“内容变化但大小、修改时间和权限未变化”的文件。重要数据建议使用默认的 `hash` 模式。
+> 快速模式可能漏掉“内容变化但大小、修改时间和支持的权限都未变化”的文件。重要数据如果需要元数据一致时也确认内容，请使用 `strict`。
+
+同名文件的元数据同步与内容比较策略相互独立，并且默认开启。可以用 `--no-sync-metadata` 跳过内容已相同文件的独立元数据更新，或用 `--preserve-times false` 和/或 `--preserve-permissions false` 缩小保留范围。
 
 ## ✅ 校验策略
 
 使用 `--verify` 控制复制后的校验：
 
-| 模式 | 行为 |
-| --- | --- |
-| `none` | 复制后不校验。 |
-| `changed` | 校验发生覆盖的文件，默认模式。 |
-| `all` | 同步后校验源目录中的所有普通文件。 |
+| 模式      | 行为                               |
+| --------- | ---------------------------------- |
+| `none`    | 复制后不校验。                     |
+| `changed` | 校验发生覆盖的文件，默认模式。     |
+| `all`     | 同步后校验源目录中的所有普通文件。 |
 
+摘要会分开统计两类 BLAKE3 内容检查：`fast` 或 `strict` 在比较阶段执行的内容比较，以及由 `--verify` 控制的复制后校验。
 目标端不存在的新文件会直接复制，不会计入复制后的 BLAKE3 校验次数。
 
 ## 🧾 命令速查
 
-| 参数 | 含义 |
-| --- | --- |
-| `-n`, `--dry-run` | 只预览，不修改目标目录。 |
-| `-d`, `--delete` | 删除目标端中源目录不存在的项目。 |
-| `--fast` | 使用只看元数据的快速比较。 |
-| `-c`, `--compare <auto\|fast\|hash>` | 选择比较策略。 |
-| `--verify <none\|changed\|all>` | 选择复制后校验策略。 |
-| `-t`, `--threads <N\|auto>` | 设置 worker 线程数。 |
-| `-q`, `--queue-size <N>` | 设置有界任务队列长度。 |
-| `--no-atomic-write` | 禁用覆盖时的临时文件写入。 |
-| `-o`, `--output <text\|json>` | 设置摘要输出格式。 |
-| `-l`, `--log-level <level>` | 设置日志级别。 |
+| 参数                                         | 含义                                         |
+| -------------------------------------------- | -------------------------------------------- |
+| `-n`, `--dry-run`                            | 只预览，不修改目标目录。                     |
+| `-d`, `--delete`                             | 删除目标端中源目录不存在的项目。             |
+| `--strict`                                   | 对同大小的已有文件使用严格 BLAKE3 内容确认。 |
+| `-c`, `--compare <fast\|strict>`             | 选择比较策略。                               |
+| `--no-sync-metadata`                         | 不更新内容已相同的同名文件元数据。           |
+| `--preserve-times <auto\|true\|false>`       | 控制时间戳同步。                             |
+| `--preserve-permissions <auto\|true\|false>` | 控制权限同步。                               |
+| `--verify <none\|changed\|all>`              | 选择复制后校验策略。                         |
+| `-t`, `--threads <N\|auto>`                  | 设置 worker 线程数。                         |
+| `-q`, `--queue-size <N>`                     | 设置有界任务队列长度。                       |
+| `--no-atomic-write`                          | 禁用覆盖时的临时文件写入。                   |
+| `-o`, `--output <text\|json>`                | 设置摘要输出格式。                           |
+| `-l`, `--log-level <level>`                  | 设置日志级别。                               |
 
 查看完整帮助：
 
@@ -190,6 +203,8 @@ fastsync --help
 不带任何参数运行 `fastsync` 时，也会输出帮助页面。
 
 ## 🧪 开发
+
+`Cargo.toml` 中的 `edition = "2024"` 是 Rust edition 名称，不是当前日历年份。Rust edition 是可选择的语言兼容性里程碑；即使在 2026 年构建项目，Rust 2024 edition 仍然是正确写法。
 
 ```bash
 cargo fmt --check
@@ -216,9 +231,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 </details>
 
 <details>
-<summary><strong>我应该使用 <code>--fast</code> 吗？</strong></summary>
+<summary><strong>我应该使用 <code>--strict</code> 吗？</strong></summary>
 
-如果同步的是生成文件、缓存、构建产物，且元数据足够可靠，可以使用。对于重要个人数据或生产数据，建议使用默认的 `hash` 模式。
+如果是重要个人数据或生产数据，且你希望元数据一致时也确认内容，可以使用。对于生成文件、缓存、构建产物，默认的 `fast` 模式通常是更合适的折中。
 
 </details>
 

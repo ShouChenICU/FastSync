@@ -60,6 +60,7 @@ pub fn run_sync(config: SyncConfig) -> Result<SyncSummary> {
     summary.target_entries = target_snapshot.entries.len();
     summary.planned_operations = plan.operations.len();
     summary.bytes_planned = plan.bytes_to_copy;
+    summary.blake3_compared_files = plan.blake3_compared_files;
 
     if !config.dry_run && config.verify_mode.verify_all_files() {
         let verified = verify_all_source_files(&source_snapshot, &config.target)?;
@@ -117,30 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_compare_overwrites_changed_file() -> std::result::Result<(), Box<dyn std::error::Error>>
-    {
-        let source = tempdir()?;
-        let target = tempdir()?;
-        fs::write(source.path().join("a.txt"), "new-value")?;
-        fs::write(target.path().join("a.txt"), "old-value")?;
-
-        let mut cli = Cli::for_test(source.path(), target.path());
-        cli.compare = crate::config::CompareMode::Hash;
-        let config = SyncConfig::try_from(cli)?;
-
-        let summary = crate::run_sync(config)?;
-
-        assert_eq!(
-            fs::read_to_string(target.path().join("a.txt"))?,
-            "new-value"
-        );
-        assert_eq!(summary.copied_files, 1);
-        assert_eq!(summary.verified_files, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn auto_compare_hashes_when_metadata_matches()
+    fn fast_compare_hashes_same_size_file_when_metadata_differs()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let source = tempdir()?;
         let target = tempdir()?;
@@ -149,23 +127,90 @@ mod tests {
         fs::write(&source_file, "new-value")?;
         fs::write(&target_file, "old-value")?;
 
-        let timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
-        filetime::set_file_mtime(&source_file, timestamp)?;
-        filetime::set_file_mtime(&target_file, timestamp)?;
+        let source_timestamp = filetime::FileTime::from_unix_time(1_700_000_100, 0);
+        let target_timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source_file, source_timestamp)?;
+        filetime::set_file_mtime(&target_file, target_timestamp)?;
 
-        let mut cli = Cli::for_test(source.path(), target.path());
-        cli.compare = crate::config::CompareMode::Auto;
+        let cli = Cli::for_test(source.path(), target.path());
         let config = SyncConfig::try_from(cli)?;
 
         let summary = crate::run_sync(config)?;
 
         assert_eq!(fs::read_to_string(target_file)?, "new-value");
         assert_eq!(summary.copied_files, 1);
+        assert_eq!(summary.blake3_compared_files, 1);
+        assert_eq!(summary.verified_files, 1);
         Ok(())
     }
 
     #[test]
-    fn fast_compare_trusts_same_size_and_modified_time()
+    fn strict_compare_syncs_metadata_when_content_matches()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        let source_file = source.path().join("a.txt");
+        let target_file = target.path().join("a.txt");
+        fs::write(&source_file, "same-value")?;
+        fs::write(&target_file, "same-value")?;
+
+        let source_timestamp = filetime::FileTime::from_unix_time(1_700_000_100, 0);
+        let target_timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source_file, source_timestamp)?;
+        filetime::set_file_mtime(&target_file, target_timestamp)?;
+
+        let mut cli = Cli::for_test(source.path(), target.path());
+        cli.compare = crate::config::CompareMode::Strict;
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(fs::read_to_string(&target_file)?, "same-value");
+        assert_eq!(summary.copied_files, 0);
+        assert_eq!(summary.metadata_updates, 1);
+        assert_eq!(summary.blake3_compared_files, 1);
+        assert_eq!(summary.verified_files, 0);
+        assert_eq!(
+            fs::metadata(&target_file)?.modified()?,
+            fs::metadata(&source_file)?.modified()?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn disabled_metadata_sync_skips_metadata_update()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        let source_file = source.path().join("a.txt");
+        let target_file = target.path().join("a.txt");
+        fs::write(&source_file, "same-value")?;
+        fs::write(&target_file, "same-value")?;
+
+        let source_timestamp = filetime::FileTime::from_unix_time(1_700_000_100, 0);
+        let target_timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source_file, source_timestamp)?;
+        filetime::set_file_mtime(&target_file, target_timestamp)?;
+        let target_modified_before = fs::metadata(&target_file)?.modified()?;
+
+        let mut cli = Cli::for_test(source.path(), target.path());
+        cli.sync_metadata = false;
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(summary.copied_files, 0);
+        assert_eq!(summary.metadata_updates, 0);
+        assert_eq!(summary.blake3_compared_files, 1);
+        assert_eq!(
+            fs::metadata(&target_file)?.modified()?,
+            target_modified_before
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn strict_shortcut_hashes_when_metadata_matches()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let source = tempdir()?;
         let target = tempdir()?;
@@ -179,13 +224,38 @@ mod tests {
         filetime::set_file_mtime(&target_file, timestamp)?;
 
         let mut cli = Cli::for_test(source.path(), target.path());
-        cli.fast = true;
+        cli.strict = true;
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(fs::read_to_string(target_file)?, "new-value");
+        assert_eq!(summary.copied_files, 1);
+        assert_eq!(summary.blake3_compared_files, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn fast_compare_trusts_same_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        let source_file = source.path().join("a.txt");
+        let target_file = target.path().join("a.txt");
+        fs::write(&source_file, "new-value")?;
+        fs::write(&target_file, "old-value")?;
+
+        let timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&source_file, timestamp)?;
+        filetime::set_file_mtime(&target_file, timestamp)?;
+
+        let cli = Cli::for_test(source.path(), target.path());
         let config = SyncConfig::try_from(cli)?;
 
         let summary = crate::run_sync(config)?;
 
         assert_eq!(fs::read_to_string(target_file)?, "old-value");
         assert_eq!(summary.copied_files, 0);
+        assert_eq!(summary.blake3_compared_files, 0);
         Ok(())
     }
 

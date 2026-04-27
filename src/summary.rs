@@ -18,6 +18,7 @@ pub struct SyncSummary {
     pub deleted_files: usize,
     pub deleted_dirs: usize,
     pub deleted_symlinks: usize,
+    pub blake3_compared_files: usize,
     pub verified_files: usize,
     pub bytes_copied: u64,
     pub errors: usize,
@@ -87,6 +88,7 @@ fastsync {status}
   元数据    {} 项
   新建目录  {} 个
   {delete_label}  {} 个文件, {} 个目录, {} 个链接
+  BLAKE3比较 {} 个文件
   BLAKE3校验 {} 个文件
 
 状态
@@ -107,6 +109,7 @@ fastsync {status}
             self.deleted_files,
             self.deleted_dirs,
             self.deleted_symlinks,
+            self.blake3_compared_files,
             self.verified_files,
             errors,
             human_duration(self.duration_ms)

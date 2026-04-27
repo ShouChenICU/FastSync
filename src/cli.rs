@@ -29,12 +29,12 @@ pub struct Cli {
     pub follow_symlinks: bool,
 
     /// 文件比较策略。
-    #[arg(short = 'c', long, value_enum, default_value_t = CompareMode::Hash)]
+    #[arg(short = 'c', long, value_enum, default_value_t = CompareMode::Fast)]
     pub compare: CompareMode,
 
-    /// fast 比较模式的快捷方式：只比较修改时间、大小和支持的平台权限元数据。
+    /// strict 比较模式的快捷方式：大小一致时始终使用 BLAKE3 确认内容。
     #[arg(long, conflicts_with = "compare")]
-    pub fast: bool,
+    pub strict: bool,
 
     /// 内容校验哈希算法。当前支持 BLAKE3。
     #[arg(long, value_enum, default_value_t = HashAlgorithm::Blake3)]
@@ -43,6 +43,10 @@ pub struct Cli {
     /// 复制后的校验强度。
     #[arg(long, value_enum, default_value_t = VerifyMode::Changed)]
     pub verify: VerifyMode,
+
+    /// 禁用同名且内容相同文件的独立元数据同步。
+    #[arg(long = "no-sync-metadata", default_value_t = true, action = ArgAction::SetFalse)]
+    pub sync_metadata: bool,
 
     /// 是否保留修改时间。
     #[arg(long, value_enum, default_value_t = PreserveMode::Auto)]
@@ -91,10 +95,11 @@ impl Cli {
             dry_run: false,
             delete: false,
             follow_symlinks: false,
-            compare: CompareMode::Hash,
-            fast: false,
+            compare: CompareMode::Fast,
+            strict: false,
             hash: HashAlgorithm::Blake3,
             verify: VerifyMode::Changed,
+            sync_metadata: true,
             preserve_times: PreserveMode::Auto,
             preserve_permissions: PreserveMode::Auto,
             atomic_write: true,
