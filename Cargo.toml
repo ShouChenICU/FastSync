@@ -4,9 +4,15 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["ShouChen"]
+description = "A fast, safe one-way directory synchronization tool for large local folders."
 license = "MIT"
 repository = "https://github.com/ShouChenICU/FastSync"
+homepage = "https://github.com/ShouChenICU/FastSync"
+documentation = "https://docs.rs/fastsync"
 readme = "README.md"
+keywords = ["sync", "directory", "backup", "blake3", "cli"]
+categories = ["command-line-utilities"]
+exclude = [".vscode/"]
 
 [dependencies]
 blake3 = "1.5"
