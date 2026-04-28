@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
@@ -20,7 +20,7 @@ use crate::i18n::{Language, set_language, tr};
 use crate::summary::{human_bytes, human_duration};
 
 const DEFAULT_BIND_PORT: u16 = 7443;
-const PROTOCOL_VERSION: u16 = 4;
+const PROTOCOL_VERSION: u16 = 5;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const BUFFER_SIZE: usize = 1024 * 1024;
 
@@ -858,6 +858,7 @@ async fn finish_send_stream(send: &mut SendStream) -> Result<()> {
 
 async fn send_tree(root: &Path, send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
     let manifest = send_manifest(root, send).await?;
+    let hashes = serve_hash_requests(root, &manifest, send, recv).await?;
     let mut requested = read_requested_paths(recv).await?;
 
     let mut total_bytes = 0_u64;
@@ -871,8 +872,9 @@ async fn send_tree(root: &Path, send: &mut SendStream, recv: &mut RecvStream) ->
             bytes = file.len,
             "sending file"
         );
-        write_message(send, &WireMessage::File(file.clone())).await?;
-        send_file(root, file, send).await?;
+        let transfer = file_transfer(root, file, hashes.get(&file.path).cloned())?;
+        write_message(send, &WireMessage::File(transfer.clone())).await?;
+        send_file(root, &transfer, send).await?;
         sent_files += 1;
         total_bytes = total_bytes.saturating_add(file.len);
     }
@@ -913,11 +915,9 @@ async fn send_manifest(root: &Path, send: &mut SendStream) -> Result<Manifest> {
                 manifest.dirs.push(dir);
             }
             crate::scan::EntryKind::File => {
-                let digest = crate::hash::blake3_file(&entry.absolute_path)?;
                 let file = FileManifest {
                     path: entry.relative_path.clone(),
                     len: entry.len,
-                    blake3: hex_digest(digest),
                     metadata: WireMetadata::from_entry(entry),
                 };
                 write_message(send, &WireMessage::ManifestFile(file.clone())).await?;
@@ -936,6 +936,52 @@ async fn send_manifest(root: &Path, send: &mut SendStream) -> Result<Manifest> {
         "sent manifest"
     );
     Ok(manifest)
+}
+
+async fn serve_hash_requests(
+    root: &Path,
+    manifest: &Manifest,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<HashMap<PathBuf, String>> {
+    let manifest_paths: HashSet<_> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    let mut hashes = HashMap::new();
+
+    loop {
+        match read_message(recv).await? {
+            WireMessage::HashRequest { path } => {
+                if !manifest_paths.contains(&path) {
+                    return Err(other_message(
+                        "serve network hash request",
+                        "peer requested hash outside the manifest",
+                    ));
+                }
+                let digest = hash_manifest_path(root, &path)?;
+                write_message(
+                    send,
+                    &WireMessage::Hash {
+                        path: path.clone(),
+                        blake3: digest.clone(),
+                    },
+                )
+                .await?;
+                hashes.insert(path, digest);
+            }
+            WireMessage::HashRequestEnd => break,
+            _ => {
+                return Err(other_message(
+                    "serve network hash requests",
+                    "unexpected message",
+                ));
+            }
+        }
+    }
+
+    Ok(hashes)
 }
 
 async fn read_requested_paths(recv: &mut RecvStream) -> Result<HashSet<PathBuf>> {
@@ -971,7 +1017,7 @@ async fn receive_tree(
         bytes = manifest.files.iter().map(|file| file.len).sum::<u64>(),
         "receiving manifest"
     );
-    let requested_files = send_file_requests(root, &manifest, options.strict, send).await?;
+    let requested_files = send_file_requests(root, &manifest, options.strict, send, recv).await?;
     info!(
         requested_files,
         skipped_files = manifest.files.len().saturating_sub(requested_files),
@@ -1054,39 +1100,80 @@ async fn send_file_requests(
     manifest: &Manifest,
     strict: bool,
     send: &mut SendStream,
+    recv: &mut RecvStream,
 ) -> Result<usize> {
     let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
         Ok(snapshot) => snapshot,
         Err(FastSyncError::InvalidTarget(path)) if path == root => {
-            let mut requested = 0_usize;
-            for file in &manifest.files {
-                write_message(
-                    send,
-                    &WireMessage::RequestFile {
-                        path: file.path.clone(),
-                    },
-                )
-                .await?;
-                requested += 1;
-            }
-            write_message(send, &WireMessage::RequestEnd).await?;
-            return Ok(requested);
+            write_message(send, &WireMessage::HashRequestEnd).await?;
+            return send_requested_file_paths(
+                manifest.files.iter().map(|file| file.path.clone()),
+                send,
+            )
+            .await;
         }
         Err(error) => return Err(error),
     };
 
-    let mut requested = 0_usize;
+    let mut requested = Vec::new();
     for file in &manifest.files {
-        if should_request_file(&target_snapshot, file, strict)? {
-            write_message(
-                send,
-                &WireMessage::RequestFile {
-                    path: file.path.clone(),
-                },
-            )
-            .await?;
-            requested += 1;
+        match file_request_decision(&target_snapshot, file, strict)? {
+            FileRequestDecision::Request => requested.push(file.path.clone()),
+            FileRequestDecision::Skip => {}
+            FileRequestDecision::CompareHash { local_path } => {
+                let local_digest = hex_digest(crate::hash::blake3_file(&local_path)?);
+                let remote_digest = request_remote_hash(send, recv, &file.path).await?;
+                if local_digest != remote_digest {
+                    requested.push(file.path.clone());
+                }
+            }
         }
+    }
+    write_message(send, &WireMessage::HashRequestEnd).await?;
+    send_requested_file_paths(requested, send).await
+}
+
+async fn request_remote_hash(
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    path: &Path,
+) -> Result<String> {
+    write_message(
+        send,
+        &WireMessage::HashRequest {
+            path: path.to_path_buf(),
+        },
+    )
+    .await?;
+
+    match read_message(recv).await? {
+        WireMessage::Hash {
+            path: reply,
+            blake3,
+        } if reply == path => Ok(blake3),
+        WireMessage::Hash { path: reply, .. } => Err(other_message(
+            "read network hash response",
+            format!(
+                "hash response path mismatch: expected {}, got {}",
+                path.display(),
+                reply.display()
+            ),
+        )),
+        _ => Err(other_message(
+            "read network hash response",
+            "unexpected message",
+        )),
+    }
+}
+
+async fn send_requested_file_paths(
+    paths: impl IntoIterator<Item = PathBuf>,
+    send: &mut SendStream,
+) -> Result<usize> {
+    let mut requested = 0_usize;
+    for path in paths {
+        write_message(send, &WireMessage::RequestFile { path }).await?;
+        requested += 1;
     }
     write_message(send, &WireMessage::RequestEnd).await?;
     Ok(requested)
@@ -1097,6 +1184,7 @@ fn request_files_for_local_state(
     root: &Path,
     manifest: &Manifest,
     strict: bool,
+    remote_hashes: &HashMap<PathBuf, String>,
 ) -> Result<Vec<PathBuf>> {
     let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
         Ok(snapshot) => snapshot,
@@ -1112,32 +1200,46 @@ fn request_files_for_local_state(
 
     let mut requested = Vec::new();
     for file in &manifest.files {
-        if should_request_file(&target_snapshot, file, strict)? {
-            requested.push(file.path.clone());
+        match file_request_decision(&target_snapshot, file, strict)? {
+            FileRequestDecision::Request => requested.push(file.path.clone()),
+            FileRequestDecision::Skip => {}
+            FileRequestDecision::CompareHash { local_path } => {
+                let local_digest = hex_digest(crate::hash::blake3_file(&local_path)?);
+                if remote_hashes.get(&file.path) != Some(&local_digest) {
+                    requested.push(file.path.clone());
+                }
+            }
         }
     }
 
     Ok(requested)
 }
 
-fn should_request_file(
+enum FileRequestDecision {
+    Request,
+    Skip,
+    CompareHash { local_path: PathBuf },
+}
+
+fn file_request_decision(
     target_snapshot: &crate::scan::Snapshot,
     file: &FileManifest,
     strict: bool,
-) -> Result<bool> {
+) -> Result<FileRequestDecision> {
     let Some(target_entry) = target_snapshot.get(&file.path) else {
-        return Ok(true);
+        return Ok(FileRequestDecision::Request);
     };
 
     if !target_entry.is_file() || target_entry.len != file.len {
-        return Ok(true);
+        return Ok(FileRequestDecision::Request);
     }
 
     if !strict && content_metadata_matches(target_entry, &file.metadata) {
-        Ok(false)
+        Ok(FileRequestDecision::Skip)
     } else {
-        let digest = crate::hash::blake3_file(&target_entry.absolute_path)?;
-        Ok(hex_digest(digest) != file.blake3)
+        Ok(FileRequestDecision::CompareHash {
+            local_path: target_entry.absolute_path.clone(),
+        })
     }
 }
 
@@ -1191,11 +1293,9 @@ fn build_manifest(root: &Path) -> Result<Manifest> {
                 metadata: WireMetadata::from_entry(entry),
             }),
             crate::scan::EntryKind::File => {
-                let digest = crate::hash::blake3_file(&entry.absolute_path)?;
                 files.push(FileManifest {
                     path: entry.relative_path.clone(),
                     len: entry.len,
-                    blake3: hex_digest(digest),
                     metadata: WireMetadata::from_entry(entry),
                 });
             }
@@ -1206,7 +1306,38 @@ fn build_manifest(root: &Path) -> Result<Manifest> {
     Ok(Manifest { dirs, files })
 }
 
-async fn send_file(root: &Path, file: &FileManifest, send: &mut SendStream) -> Result<()> {
+#[cfg(test)]
+fn manifest_hashes(root: &Path, manifest: &Manifest) -> Result<HashMap<PathBuf, String>> {
+    let mut hashes = HashMap::new();
+    for file in &manifest.files {
+        hashes.insert(file.path.clone(), hash_manifest_path(root, &file.path)?);
+    }
+    Ok(hashes)
+}
+
+fn file_transfer(
+    root: &Path,
+    file: &FileManifest,
+    cached_hash: Option<String>,
+) -> Result<FileTransfer> {
+    let blake3 = match cached_hash {
+        Some(hash) => hash,
+        None => hash_manifest_path(root, &file.path)?,
+    };
+    Ok(FileTransfer {
+        path: file.path.clone(),
+        len: file.len,
+        blake3,
+        metadata: file.metadata.clone(),
+    })
+}
+
+fn hash_manifest_path(root: &Path, path: &Path) -> Result<String> {
+    let path = safe_join(root, path)?;
+    crate::hash::blake3_file(&path).map(hex_digest)
+}
+
+async fn send_file(root: &Path, file: &FileTransfer, send: &mut SendStream) -> Result<()> {
     let path = safe_join(root, &file.path)?;
     let mut input = tokio::fs::File::open(&path)
         .await
@@ -1236,7 +1367,7 @@ async fn send_file(root: &Path, file: &FileManifest, send: &mut SendStream) -> R
 
 async fn receive_file(
     root: &Path,
-    file: &FileManifest,
+    file: &FileTransfer,
     recv: &mut RecvStream,
     options: TransferOptions,
 ) -> Result<()> {
@@ -1737,6 +1868,14 @@ struct FileManifest {
     #[serde(with = "wire_path")]
     path: PathBuf,
     len: u64,
+    metadata: WireMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileTransfer {
+    #[serde(with = "wire_path")]
+    path: PathBuf,
+    len: u64,
     blake3: String,
     metadata: WireMetadata,
 }
@@ -1801,12 +1940,22 @@ enum WireMessage {
     ManifestDir(DirManifest),
     ManifestFile(FileManifest),
     ManifestEnd,
+    HashRequest {
+        #[serde(with = "wire_path")]
+        path: PathBuf,
+    },
+    HashRequestEnd,
+    Hash {
+        #[serde(with = "wire_path")]
+        path: PathBuf,
+        blake3: String,
+    },
     RequestFile {
         #[serde(with = "wire_path")]
         path: PathBuf,
     },
     RequestEnd,
-    File(FileManifest),
+    File(FileTransfer),
     Done,
     Ack {
         files: usize,
@@ -1910,7 +2059,6 @@ mod tests {
         let file = FileManifest {
             path: PathBuf::from("mc").join("Aaron.flac"),
             len: 0,
-            blake3: String::new(),
             metadata: WireMetadata {
                 modified_secs: None,
                 modified_nanos: None,
@@ -1936,7 +2084,6 @@ mod tests {
         let file_json = r#"{
             "path":"mc\\Aaron.flac",
             "len":0,
-            "blake3":"",
             "metadata":{
                 "modified_secs":null,
                 "modified_nanos":null,
@@ -1964,7 +2111,6 @@ mod tests {
         let file_json = r#"{
             "path":"../x",
             "len":0,
-            "blake3":"",
             "metadata":{
                 "modified_secs":null,
                 "modified_nanos":null,
@@ -1983,7 +2129,6 @@ mod tests {
             .map(|index| FileManifest {
                 path: PathBuf::from("album").join(format!("track-{index:05}.flac")),
                 len: 12_345,
-                blake3: "0".repeat(64),
                 metadata: WireMetadata {
                     modified_secs: Some(1_700_000_000),
                     modified_nanos: Some(0),
@@ -2008,6 +2153,35 @@ mod tests {
 
         assert!(old_payload.len() > MAX_MESSAGE_SIZE);
         assert!(largest_stream_item < MAX_MESSAGE_SIZE);
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_files_omit_hash_until_transfer()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let metadata = WireMetadata {
+            modified_secs: None,
+            modified_nanos: None,
+            readonly: false,
+            unix_mode: None,
+        };
+        let manifest_file = FileManifest {
+            path: PathBuf::from("song.flac"),
+            len: 10,
+            metadata: metadata.clone(),
+        };
+        let transfer = FileTransfer {
+            path: PathBuf::from("song.flac"),
+            len: 10,
+            blake3: "a".repeat(64),
+            metadata,
+        };
+
+        let manifest_json = serde_json::to_string(&WireMessage::ManifestFile(manifest_file))?;
+        let transfer_json = serde_json::to_string(&WireMessage::File(transfer))?;
+
+        assert!(!manifest_json.contains("blake3"));
+        assert!(transfer_json.contains("blake3"));
         Ok(())
     }
 
@@ -2139,8 +2313,10 @@ mod tests {
         std::fs::write(source.path().join("same.txt"), "same content")?;
         std::fs::write(target.path().join("same.txt"), "same content")?;
         let manifest = build_manifest(source.path())?;
+        let remote_hashes = manifest_hashes(source.path(), &manifest)?;
 
-        let requested = request_files_for_local_state(target.path(), &manifest, false)?;
+        let requested =
+            request_files_for_local_state(target.path(), &manifest, false, &remote_hashes)?;
 
         assert!(requested.is_empty());
         Ok(())
@@ -2157,8 +2333,10 @@ mod tests {
         std::fs::write(&changed_target, "target")?;
         filetime::set_file_mtime(&changed_target, filetime::FileTime::from_unix_time(1, 0))?;
         let manifest = build_manifest(source.path())?;
+        let remote_hashes = manifest_hashes(source.path(), &manifest)?;
 
-        let requested = request_files_for_local_state(target.path(), &manifest, false)?;
+        let requested =
+            request_files_for_local_state(target.path(), &manifest, false, &remote_hashes)?;
 
         assert!(requested.contains(&PathBuf::from("changed.txt")));
         assert!(requested.contains(&PathBuf::from("missing.txt")));
@@ -2173,6 +2351,7 @@ mod tests {
         let target = tempfile::tempdir()?;
         std::fs::write(source.path().join("same-meta.txt"), "aaaa")?;
         let manifest = build_manifest(source.path())?;
+        let remote_hashes = manifest_hashes(source.path(), &manifest)?;
         let file = manifest
             .files
             .iter()
@@ -2189,8 +2368,10 @@ mod tests {
             std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(mode))?;
         }
 
-        let fast_requested = request_files_for_local_state(target.path(), &manifest, false)?;
-        let strict_requested = request_files_for_local_state(target.path(), &manifest, true)?;
+        let fast_requested =
+            request_files_for_local_state(target.path(), &manifest, false, &remote_hashes)?;
+        let strict_requested =
+            request_files_for_local_state(target.path(), &manifest, true, &remote_hashes)?;
 
         assert!(fast_requested.is_empty());
         assert_eq!(strict_requested, vec![PathBuf::from("same-meta.txt")]);
@@ -2212,7 +2393,6 @@ mod tests {
             files: vec![FileManifest {
                 path: PathBuf::from("keep.txt"),
                 len: 4,
-                blake3: hex_digest(crate::hash::blake3_file(&root.path().join("keep.txt"))?),
                 metadata: WireMetadata::from_entry(
                     crate::scan::scan_directory(root.path(), false)?
                         .get(Path::new("keep.txt"))
@@ -2244,7 +2424,9 @@ mod tests {
         filetime::set_file_mtime(&source_file, source_time)?;
         filetime::set_file_mtime(&target_file, target_time)?;
         let manifest = build_manifest(source.path())?;
-        let requested = request_files_for_local_state(target.path(), &manifest, false)?;
+        let remote_hashes = manifest_hashes(source.path(), &manifest)?;
+        let requested =
+            request_files_for_local_state(target.path(), &manifest, false, &remote_hashes)?;
 
         apply_file_metadata(
             target.path(),
