@@ -94,6 +94,7 @@ pub struct ConnectConfig {
     pub directory: PathBuf,
     pub direction: SyncDirection,
     pub delete: bool,
+    pub strict: bool,
     pub preserve_times: bool,
     pub preserve_permissions: bool,
     pub code: Option<String>,
@@ -174,6 +175,7 @@ impl ConnectConfig {
                 .clone(),
             direction: direction_from_matches(matches),
             delete: matches.get_flag("delete"),
+            strict: matches.get_flag("strict"),
             preserve_times: *matches.get_one::<bool>("preserve_times").unwrap_or(&true),
             preserve_permissions: matches.get_flag("preserve_permissions"),
             code: matches.get_one::<String>("code").cloned(),
@@ -189,6 +191,7 @@ impl ConnectConfig {
     fn transfer_options(&self) -> TransferOptions {
         TransferOptions {
             delete: self.delete,
+            strict: self.strict,
             preserve_times: self.preserve_times,
             preserve_permissions: self.preserve_permissions,
         }
@@ -336,6 +339,12 @@ fn network_command(language: Language) -> Command {
                         .long("delete")
                         .action(ArgAction::SetTrue)
                         .help(tr(language, "network.connect.delete")),
+                )
+                .arg(
+                    Arg::new("strict")
+                        .long("strict")
+                        .action(ArgAction::SetTrue)
+                        .help(tr(language, "network.connect.strict")),
                 )
                 .arg(
                     Arg::new("preserve_times")
@@ -612,6 +621,7 @@ async fn handle_share_connection(
         requested_direction = direction.as_str(),
         protocol,
         delete = options.delete,
+        strict = options.strict,
         preserve_times = options.preserve_times,
         preserve_permissions = options.preserve_permissions,
         "pairing hello received"
@@ -928,10 +938,11 @@ async fn receive_tree(
             .await
             .map_err(|error| io_path("create received directory", &path, error))?;
     }
-    let requested_files = request_files_for_local_state(root, &manifest)?;
+    let requested_files = request_files_for_local_state(root, &manifest, options.strict)?;
     info!(
         requested_files = requested_files.len(),
         skipped_files = manifest.files.len().saturating_sub(requested_files.len()),
+        strict = options.strict,
         "planned network file requests"
     );
     write_message(
@@ -975,7 +986,11 @@ async fn receive_tree(
     })
 }
 
-fn request_files_for_local_state(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>> {
+fn request_files_for_local_state(
+    root: &Path,
+    manifest: &Manifest,
+    strict: bool,
+) -> Result<Vec<PathBuf>> {
     let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
         Ok(snapshot) => snapshot,
         Err(FastSyncError::InvalidTarget(path)) if path == root => {
@@ -1000,7 +1015,7 @@ fn request_files_for_local_state(root: &Path, manifest: &Manifest) -> Result<Vec
             continue;
         }
 
-        if content_metadata_matches(target_entry, &file.metadata) {
+        if !strict && content_metadata_matches(target_entry, &file.metadata) {
             continue;
         }
 
@@ -1502,6 +1517,7 @@ struct TransferSummary {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct TransferOptions {
     delete: bool,
+    strict: bool,
     preserve_times: bool,
     preserve_permissions: bool,
 }
@@ -1723,6 +1739,7 @@ mod tests {
                 OsString::from("/tmp/project"),
                 OsString::from("-u"),
                 OsString::from("-d"),
+                OsString::from("--strict"),
                 OsString::from("-p"),
                 OsString::from("-c"),
                 OsString::from("123456"),
@@ -1736,6 +1753,7 @@ mod tests {
 
         assert_eq!(config.direction, SyncDirection::Push);
         assert!(config.delete);
+        assert!(config.strict);
         assert!(config.preserve_permissions);
         assert_eq!(config.code.as_deref(), Some("123456"));
     }
@@ -1806,7 +1824,7 @@ mod tests {
         std::fs::write(target.path().join("same.txt"), "same content")?;
         let manifest = build_manifest(source.path())?;
 
-        let requested = request_files_for_local_state(target.path(), &manifest)?;
+        let requested = request_files_for_local_state(target.path(), &manifest, false)?;
 
         assert!(requested.is_empty());
         Ok(())
@@ -1824,11 +1842,140 @@ mod tests {
         filetime::set_file_mtime(&changed_target, filetime::FileTime::from_unix_time(1, 0))?;
         let manifest = build_manifest(source.path())?;
 
-        let requested = request_files_for_local_state(target.path(), &manifest)?;
+        let requested = request_files_for_local_state(target.path(), &manifest, false)?;
 
         assert!(requested.contains(&PathBuf::from("changed.txt")));
         assert!(requested.contains(&PathBuf::from("missing.txt")));
         assert_eq!(requested.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn strict_request_files_hashes_even_when_metadata_matches()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        std::fs::write(source.path().join("same-meta.txt"), "aaaa")?;
+        let manifest = build_manifest(source.path())?;
+        let file = manifest
+            .files
+            .iter()
+            .find(|file| file.path == Path::new("same-meta.txt"))
+            .expect("manifest should contain source file");
+        let target_file = target.path().join("same-meta.txt");
+        std::fs::write(&target_file, "bbbb")?;
+        if let Some(mtime) = file.metadata.modified_filetime() {
+            filetime::set_file_mtime(&target_file, mtime)?;
+        }
+        #[cfg(unix)]
+        if let Some(mode) = file.metadata.unix_mode {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(mode))?;
+        }
+
+        let fast_requested = request_files_for_local_state(target.path(), &manifest, false)?;
+        let strict_requested = request_files_for_local_state(target.path(), &manifest, true)?;
+
+        assert!(fast_requested.is_empty());
+        assert_eq!(strict_requested, vec![PathBuf::from("same-meta.txt")]);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_obsolete_removes_files_and_nested_directories()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let root = tempfile::tempdir()?;
+        let stale_dir = root.path().join("stale");
+        std::fs::create_dir(&stale_dir)?;
+        std::fs::write(stale_dir.join("old.txt"), "old")?;
+        std::fs::write(root.path().join("stale.txt"), "old")?;
+        std::fs::write(root.path().join("keep.txt"), "keep")?;
+        let manifest = Manifest {
+            dirs: Vec::new(),
+            files: vec![FileManifest {
+                path: PathBuf::from("keep.txt"),
+                len: 4,
+                blake3: hex_digest(crate::hash::blake3_file(&root.path().join("keep.txt"))?),
+                metadata: WireMetadata::from_entry(
+                    crate::scan::scan_directory(root.path(), false)?
+                        .get(Path::new("keep.txt"))
+                        .expect("keep.txt should be scanned"),
+                ),
+            }],
+        };
+
+        let deleted = runtime.block_on(delete_obsolete(root.path(), &manifest))?;
+
+        assert_eq!(deleted, 3);
+        assert!(!stale_dir.exists());
+        assert!(!root.path().join("stale.txt").exists());
+        assert!(root.path().join("keep.txt").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn skipped_network_file_still_receives_metadata()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        let source_file = source.path().join("same.txt");
+        let target_file = target.path().join("same.txt");
+        std::fs::write(&source_file, "same content")?;
+        std::fs::write(&target_file, "same content")?;
+        let source_time = filetime::FileTime::from_unix_time(123, 0);
+        let target_time = filetime::FileTime::from_unix_time(456, 0);
+        filetime::set_file_mtime(&source_file, source_time)?;
+        filetime::set_file_mtime(&target_file, target_time)?;
+        let manifest = build_manifest(source.path())?;
+        let requested = request_files_for_local_state(target.path(), &manifest, false)?;
+
+        apply_file_metadata(
+            target.path(),
+            &manifest.files,
+            TransferOptions {
+                delete: false,
+                strict: false,
+                preserve_times: true,
+                preserve_permissions: false,
+            },
+        )?;
+
+        let updated_time =
+            filetime::FileTime::from_last_modification_time(&std::fs::metadata(&target_file)?);
+        assert!(requested.is_empty());
+        assert_eq!(updated_time, source_time);
+        Ok(())
+    }
+
+    #[test]
+    fn network_file_path_rejects_existing_directory_without_delete()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("item");
+        std::fs::create_dir(&path)?;
+
+        let error = runtime
+            .block_on(ensure_file_path(&path, false))
+            .expect_err("directory/file conflict should fail without delete");
+
+        assert!(error.to_string().contains("exists and is a directory"));
+        Ok(())
+    }
+
+    #[test]
+    fn network_directory_path_replaces_file_when_delete_enabled()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("item");
+        std::fs::write(&path, "file")?;
+
+        runtime.block_on(ensure_directory_path(&path, true))?;
+        std::fs::create_dir(&path)?;
+
+        assert!(path.is_dir());
         Ok(())
     }
 }

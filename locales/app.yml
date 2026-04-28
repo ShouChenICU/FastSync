@@ -82,13 +82,13 @@ cli.network_help:
   en: |-
     Network one-shot commands:
       fastsync s <DIRECTORY> [-r|-m send|receive|both] [-a]
-      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d]
+      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d] [--strict]
 
     Use `fastsync share --help` or `fastsync connect --help` for network sync details.
   zh-CN: |-
     一次性网络同步命令：
       fastsync s <DIRECTORY> [-r|-m send|receive|both] [-a]
-      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d]
+      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d] [--strict]
 
     使用 `fastsync share --help` 或 `fastsync connect --help` 查看网络同步详情。
 
@@ -181,6 +181,9 @@ network.connect.code:
 network.connect.delete:
   en: "Delete extra entries in the receiving directory. For push, the server must also allow deletion."
   zh-CN: "删除接收目录中的多余项。push 时服务端也必须允许删除。"
+network.connect.strict:
+  en: "Use strict comparison: hash same-size local files even when metadata matches."
+  zh-CN: "使用严格比较：同大小本地文件即使元数据一致也计算哈希。"
 network.connect.no_preserve_times:
   en: "Do not preserve source modification times on received files and directories."
   zh-CN: "不在接收的文件和目录上保留源端修改时间。"
