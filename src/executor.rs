@@ -1,20 +1,16 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use tracing::{debug, info};
 
 use crate::config::SyncConfig;
-use crate::error::{FastSyncError, Result, io_context};
-use crate::i18n::{tr_current, tr_path, tr_source_target};
+use crate::endpoint::SyncEndpoints;
+use crate::error::{FastSyncError, Result};
+use crate::i18n::tr_current;
 use crate::plan::{CopyReason, PlanOperation, SyncPlan};
 use crate::summary::SyncSummary;
-use crate::verify::verify_file;
-
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+use crate::verify::verify_file_with_endpoints;
 
 #[derive(Debug, Clone)]
 enum WorkerTask {
@@ -41,14 +37,23 @@ struct WorkerReport {
 /// 目录创建和删除按顺序执行，文件复制与元数据修正通过有界队列交给固定数量
 /// worker 处理，以避免扫描/调度阶段无限占用内存。
 pub fn execute_plan(config: &SyncConfig, plan: &SyncPlan) -> Result<SyncSummary> {
+    let endpoints = SyncEndpoints::local(config.source.clone(), config.target.clone());
+    execute_plan_with_endpoints(config, &endpoints, plan)
+}
+
+/// 使用显式端点执行同步计划。
+///
+/// 编排层只处理操作顺序、worker 调度和摘要统计；具体文件系统 I/O 交给端点层。
+pub fn execute_plan_with_endpoints(
+    config: &SyncConfig,
+    endpoints: &SyncEndpoints,
+    plan: &SyncPlan,
+) -> Result<SyncSummary> {
     if config.dry_run {
-        return Ok(dry_run_summary(config, plan));
+        return Ok(dry_run_summary(endpoints, plan));
     }
 
-    io_context(
-        tr_path("io.create_target_root", config.target.display()),
-        fs::create_dir_all(&config.target),
-    )?;
+    endpoints.target().ensure_root()?;
 
     let mut summary = SyncSummary {
         dry_run: false,
@@ -60,7 +65,7 @@ pub fn execute_plan(config: &SyncConfig, plan: &SyncPlan) -> Result<SyncSummary>
     for operation in &plan.operations {
         match operation {
             PlanOperation::CreateDirectory { relative_path } => {
-                create_directory(&config.target, relative_path)?;
+                endpoints.target().create_directory(relative_path)?;
                 summary.created_dirs += 1;
             }
             PlanOperation::CopyFile {
@@ -83,7 +88,7 @@ pub fn execute_plan(config: &SyncConfig, plan: &SyncPlan) -> Result<SyncSummary>
         }
     }
 
-    let report = run_workers(config, worker_tasks)?;
+    let report = run_workers(config, endpoints, worker_tasks)?;
     summary.copied_files += report.copied_files;
     summary.metadata_updates += report.metadata_updates;
     summary.verified_files += report.verified_files;
@@ -92,15 +97,18 @@ pub fn execute_plan(config: &SyncConfig, plan: &SyncPlan) -> Result<SyncSummary>
     for operation in delete_ops {
         match operation {
             PlanOperation::DeleteFile { relative_path } => {
-                delete_file(&config.target, &relative_path)?;
+                endpoints.target().delete_file(&relative_path)?;
+                info!(path = %relative_path.display(), "{}", tr_current("log.file_deleted"));
                 summary.deleted_files += 1;
             }
             PlanOperation::DeleteDirectory { relative_path } => {
-                delete_directory(&config.target, &relative_path)?;
+                endpoints.target().delete_directory(&relative_path)?;
+                info!(path = %relative_path.display(), "{}", tr_current("log.directory_deleted"));
                 summary.deleted_dirs += 1;
             }
             PlanOperation::DeleteSymlink { relative_path } => {
-                delete_symlink(&config.target, &relative_path)?;
+                endpoints.target().delete_symlink(&relative_path)?;
+                info!(path = %relative_path.display(), "{}", tr_current("log.symlink_deleted"));
                 summary.deleted_symlinks += 1;
             }
             _ => {}
@@ -110,7 +118,7 @@ pub fn execute_plan(config: &SyncConfig, plan: &SyncPlan) -> Result<SyncSummary>
     Ok(summary)
 }
 
-fn dry_run_summary(config: &SyncConfig, plan: &SyncPlan) -> SyncSummary {
+fn dry_run_summary(endpoints: &SyncEndpoints, plan: &SyncPlan) -> SyncSummary {
     let mut summary = SyncSummary {
         dry_run: true,
         ..SyncSummary::default()
@@ -130,12 +138,16 @@ fn dry_run_summary(config: &SyncConfig, plan: &SyncPlan) -> SyncSummary {
         }
     }
     summary.errors = 0;
-    summary.source = config.source.clone();
-    summary.target = config.target.clone();
+    summary.source = endpoints.source().root().to_path_buf();
+    summary.target = endpoints.target().root().to_path_buf();
     summary
 }
 
-fn run_workers(config: &SyncConfig, tasks: Vec<WorkerTask>) -> Result<WorkerReport> {
+fn run_workers(
+    config: &SyncConfig,
+    endpoints: &SyncEndpoints,
+    tasks: Vec<WorkerTask>,
+) -> Result<WorkerReport> {
     if tasks.is_empty() {
         return Ok(WorkerReport::default());
     }
@@ -147,7 +159,9 @@ fn run_workers(config: &SyncConfig, tasks: Vec<WorkerTask>) -> Result<WorkerRepo
         for worker_id in 0..config.threads {
             let task_receiver = task_receiver.clone();
             let report_sender = report_sender.clone();
-            scope.spawn(move || worker_loop(worker_id, config, task_receiver, report_sender));
+            scope.spawn(move || {
+                worker_loop(worker_id, config, endpoints, task_receiver, report_sender)
+            });
         }
 
         drop(report_sender);
@@ -169,6 +183,7 @@ fn send_tasks(sender: &Sender<WorkerTask>, tasks: Vec<WorkerTask>) {
 fn worker_loop(
     worker_id: usize,
     config: &SyncConfig,
+    endpoints: &SyncEndpoints,
     receiver: Receiver<WorkerTask>,
     sender: Sender<Result<WorkerReport>>,
 ) {
@@ -180,12 +195,20 @@ fn worker_loop(
                 relative_path,
                 bytes,
                 reason,
-            } => copy_one_file(config, &relative_path, bytes, reason, &mut report),
-            WorkerTask::SetMetadata { relative_path } => {
-                apply_file_metadata(config, &relative_path).map(|_| {
+            } => copy_one_file(
+                config,
+                endpoints,
+                &relative_path,
+                bytes,
+                reason,
+                &mut report,
+            ),
+            WorkerTask::SetMetadata { relative_path } => endpoints
+                .target()
+                .apply_file_metadata_from(endpoints.source(), &relative_path, config)
+                .map(|_| {
                     report.metadata_updates += 1;
-                })
-            }
+                }),
         };
 
         if let Err(error) = result {
@@ -236,188 +259,36 @@ fn collect_worker_reports(
 
 fn copy_one_file(
     config: &SyncConfig,
+    endpoints: &SyncEndpoints,
     relative_path: &Path,
     bytes: u64,
     reason: CopyReason,
     report: &mut WorkerReport,
 ) -> Result<()> {
-    let source = config.source.join(relative_path);
-    let target = config.target.join(relative_path);
-
     if reason == CopyReason::Missing {
-        copy_file_direct(&source, &target)?;
+        endpoints
+            .target()
+            .copy_file_from(endpoints.source(), relative_path, false)?;
     } else if config.atomic_write {
-        copy_file_atomic(&source, &target)?;
+        endpoints
+            .target()
+            .copy_file_from(endpoints.source(), relative_path, true)?;
     } else {
-        copy_file_direct(&source, &target)?;
+        endpoints
+            .target()
+            .copy_file_from(endpoints.source(), relative_path, false)?;
     }
-    apply_file_metadata(config, relative_path)?;
+    endpoints
+        .target()
+        .apply_file_metadata_from(endpoints.source(), relative_path, config)?;
 
     if reason != CopyReason::Missing && config.verify_mode.verify_changed_files() {
-        verify_file(&source, &target, relative_path)?;
+        verify_file_with_endpoints(endpoints, relative_path)?;
         report.verified_files += 1;
     }
 
     report.copied_files += 1;
     report.bytes_copied = report.bytes_copied.saturating_add(bytes);
     info!(path = %relative_path.display(), bytes, "{}", tr_current("log.file_copied"));
-    Ok(())
-}
-
-fn create_directory(target_root: &Path, relative_path: &Path) -> Result<()> {
-    let path = target_root.join(relative_path);
-    io_context(
-        tr_path("io.create_directory", path.display()),
-        fs::create_dir_all(path),
-    )
-}
-
-fn delete_file(target_root: &Path, relative_path: &Path) -> Result<()> {
-    let path = target_root.join(relative_path);
-    io_context(
-        tr_path("io.delete_file", path.display()),
-        fs::remove_file(path),
-    )?;
-    info!(path = %relative_path.display(), "{}", tr_current("log.file_deleted"));
-    Ok(())
-}
-
-fn delete_directory(target_root: &Path, relative_path: &Path) -> Result<()> {
-    let path = target_root.join(relative_path);
-    io_context(
-        tr_path("io.delete_directory", path.display()),
-        fs::remove_dir(path),
-    )?;
-    info!(path = %relative_path.display(), "{}", tr_current("log.directory_deleted"));
-    Ok(())
-}
-
-fn delete_symlink(target_root: &Path, relative_path: &Path) -> Result<()> {
-    let path = target_root.join(relative_path);
-    io_context(
-        tr_path("io.delete_symlink", path.display()),
-        fs::remove_file(path),
-    )?;
-    info!(path = %relative_path.display(), "{}", tr_current("log.symlink_deleted"));
-    Ok(())
-}
-
-fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
-    let parent = ensure_parent(target)?;
-    let temp_path = unique_temp_path(parent);
-
-    let copy_result = (|| {
-        let source_file = io_context(
-            tr_path("io.open_source_file", source.display()),
-            File::open(source),
-        )?;
-        let temp_file = io_context(
-            tr_path("io.create_temp_file", temp_path.display()),
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp_path),
-        )?;
-        let mut reader = BufReader::with_capacity(1024 * 1024, source_file);
-        let mut writer = BufWriter::with_capacity(1024 * 1024, temp_file);
-        io_context(
-            tr_path("io.copy_to_temp_file", temp_path.display()),
-            std::io::copy(&mut reader, &mut writer),
-        )?;
-        io_context(
-            tr_path("io.flush_temp_file", temp_path.display()),
-            writer.flush(),
-        )?;
-        let file = writer.into_inner().map_err(|error| FastSyncError::Io {
-            context: tr_path("io.finish_temp_file", temp_path.display()),
-            source: error.into_error(),
-        })?;
-        io_context(
-            tr_path("io.sync_temp_file", temp_path.display()),
-            file.sync_data(),
-        )?;
-        Ok(())
-    })();
-
-    if let Err(error) = copy_result {
-        let _ = fs::remove_file(&temp_path);
-        return Err(error);
-    }
-
-    match fs::rename(&temp_path, target) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            io_context(
-                tr_path("io.remove_old_target_before_replace", target.display()),
-                fs::remove_file(target),
-            )?;
-            io_context(
-                tr_path("io.rename_temp_to_target", target.display()),
-                fs::rename(&temp_path, target),
-            )
-        }
-        Err(error) => {
-            let _ = fs::remove_file(&temp_path);
-            Err(FastSyncError::Io {
-                context: tr_path("io.rename_temp_to_target", target.display()),
-                source: error,
-            })
-        }
-    }
-}
-
-fn copy_file_direct(source: &Path, target: &Path) -> Result<()> {
-    ensure_parent(target)?;
-    io_context(
-        tr_source_target("io.copy_file_direct", source.display(), target.display()),
-        fs::copy(source, target),
-    )?;
-    Ok(())
-}
-
-fn ensure_parent(path: &Path) -> Result<&Path> {
-    let Some(parent) = path.parent() else {
-        return Err(FastSyncError::Io {
-            context: tr_path("io.missing_parent", path.display()),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent"),
-        });
-    };
-    io_context(
-        tr_path("io.create_parent", parent.display()),
-        fs::create_dir_all(parent),
-    )?;
-    Ok(parent)
-}
-
-fn unique_temp_path(parent: &Path) -> PathBuf {
-    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    parent.join(format!(".fastsync.tmp.{}.{}", std::process::id(), counter))
-}
-
-fn apply_file_metadata(config: &SyncConfig, relative_path: &Path) -> Result<()> {
-    let source = config.source.join(relative_path);
-    let target = config.target.join(relative_path);
-    let source_metadata = io_context(
-        tr_path("io.read_source_metadata", source.display()),
-        fs::metadata(&source),
-    )?;
-
-    if config.preserve_permissions.enabled() {
-        let permissions = source_metadata.permissions();
-        io_context(
-            tr_path("io.set_target_permissions", target.display()),
-            fs::set_permissions(&target, permissions),
-        )?;
-    }
-
-    if config.preserve_times.enabled() {
-        let atime = filetime::FileTime::from_last_access_time(&source_metadata);
-        let mtime = filetime::FileTime::from_last_modification_time(&source_metadata);
-        io_context(
-            tr_path("io.set_target_times", target.display()),
-            filetime::set_file_times(&target, atime, mtime),
-        )?;
-    }
-
     Ok(())
 }

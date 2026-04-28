@@ -7,6 +7,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 pub mod cli;
 pub mod compare;
 pub mod config;
+pub mod endpoint;
 pub mod error;
 pub mod executor;
 pub mod hash;
@@ -20,29 +21,40 @@ use std::time::Instant;
 
 use tracing::info;
 
-use crate::compare::build_plan;
+use crate::compare::build_plan_with_endpoints;
 use crate::config::SyncConfig;
+use crate::endpoint::SyncEndpoints;
 use crate::error::Result;
-use crate::executor::execute_plan;
-use crate::scan::{scan_directory, scan_optional_directory};
+use crate::executor::execute_plan_with_endpoints;
 use crate::summary::SyncSummary;
-use crate::verify::verify_all_source_files;
+use crate::verify::verify_all_source_files_with_endpoints;
 
 /// 执行一次单向目录同步。
 ///
 /// 输入为已经解析完成的配置，输出为稳定的同步摘要。该函数不负责解析 CLI，
 /// 也不直接渲染终端输出，方便后续被测试、GUI 或服务化入口复用。
 pub fn run_sync(config: SyncConfig) -> Result<SyncSummary> {
+    let endpoints = SyncEndpoints::local(config.source.clone(), config.target.clone());
+    run_sync_with_endpoints(config, endpoints)
+}
+
+/// 使用给定端点执行一次单向目录同步。
+///
+/// 当前公开 CLI 会传入本地端点；该入口为后续远端端点接入保留稳定编排层。
+pub fn run_sync_with_endpoints(
+    config: SyncConfig,
+    endpoints: SyncEndpoints,
+) -> Result<SyncSummary> {
     let started = Instant::now();
     info!(
-        source = %config.source.display(),
-        target = %config.target.display(),
+        source = %endpoints.source().root().display(),
+        target = %endpoints.target().root().display(),
         "{}",
         crate::i18n::tr_current("log.scan_started")
     );
 
-    let source_snapshot = scan_directory(&config.source, config.follow_symlinks)?;
-    let target_snapshot = scan_optional_directory(&config.target, config.follow_symlinks)?;
+    let source_snapshot = endpoints.scan_source(config.follow_symlinks)?;
+    let target_snapshot = endpoints.scan_target(config.follow_symlinks)?;
 
     info!(
         source_entries = source_snapshot.entries.len(),
@@ -51,7 +63,7 @@ pub fn run_sync(config: SyncConfig) -> Result<SyncSummary> {
         crate::i18n::tr_current("log.scan_finished")
     );
 
-    let plan = build_plan(&config, &source_snapshot, &target_snapshot)?;
+    let plan = build_plan_with_endpoints(&config, &endpoints, &source_snapshot, &target_snapshot)?;
     info!(
         operations = plan.operations.len(),
         bytes = plan.bytes_to_copy,
@@ -59,9 +71,9 @@ pub fn run_sync(config: SyncConfig) -> Result<SyncSummary> {
         crate::i18n::tr_current("log.plan_built")
     );
 
-    let mut summary = execute_plan(&config, &plan)?;
-    summary.source = config.source.clone();
-    summary.target = config.target.clone();
+    let mut summary = execute_plan_with_endpoints(&config, &endpoints, &plan)?;
+    summary.source = endpoints.source().root().to_path_buf();
+    summary.target = endpoints.target().root().to_path_buf();
     summary.source_entries = source_snapshot.entries.len();
     summary.target_entries = target_snapshot.entries.len();
     summary.planned_operations = plan.operations.len();
@@ -69,7 +81,7 @@ pub fn run_sync(config: SyncConfig) -> Result<SyncSummary> {
     summary.blake3_compared_files = plan.blake3_compared_files;
 
     if !config.dry_run && config.verify_mode.verify_all_files() {
-        let verified = verify_all_source_files(&source_snapshot, &config.target)?;
+        let verified = verify_all_source_files_with_endpoints(&source_snapshot, &endpoints)?;
         summary.verified_files += verified;
     }
 

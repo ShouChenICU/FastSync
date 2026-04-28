@@ -16,7 +16,14 @@ pub fn blake3_file(path: &Path) -> Result<Blake3Digest> {
         tr_path("io.open_file_for_hash", path.display()),
         File::open(path),
     )?;
-    let mut reader = BufReader::with_capacity(1024 * 1024, file);
+    blake3_reader(path, file)
+}
+
+/// 从任意流式 reader 计算 BLAKE3 哈希。
+///
+/// `path` 只用于错误上下文；调用方仍需保证 reader 对应的内容来源正确。
+pub fn blake3_reader(path: &Path, reader: impl Read) -> Result<Blake3Digest> {
+    let mut reader = BufReader::with_capacity(1024 * 1024, reader);
     let mut hasher = blake3::Hasher::new();
     let mut buffer = [0_u8; 1024 * 1024];
 

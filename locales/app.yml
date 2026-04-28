@@ -284,6 +284,15 @@ io.rename_temp_to_target:
 io.copy_file_direct:
   en: "copy file directly: %{source} -> %{target}"
   zh-CN: "直接复制文件: %{source} -> %{target}"
+io.copy_to_target_file:
+  en: "copy to target file: %{path}"
+  zh-CN: "复制到目标文件: %{path}"
+io.flush_target_file:
+  en: "flush target file: %{path}"
+  zh-CN: "刷新目标文件: %{path}"
+io.finish_target_file:
+  en: "finish writing target file: %{path}"
+  zh-CN: "完成目标文件写入: %{path}"
 io.missing_parent:
   en: "target path has no parent directory: %{path}"
   zh-CN: "目标路径缺少父目录: %{path}"

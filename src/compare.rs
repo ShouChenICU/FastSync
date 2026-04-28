@@ -1,8 +1,8 @@
 use std::cmp::Reverse;
 
 use crate::config::{CompareMode, SyncConfig};
+use crate::endpoint::SyncEndpoints;
 use crate::error::{FastSyncError, Result};
-use crate::hash::same_blake3;
 use crate::plan::{CopyReason, PlanOperation, SyncPlan};
 use crate::scan::{EntryKind, FileEntry, Snapshot};
 
@@ -11,6 +11,19 @@ use crate::scan::{EntryKind, FileEntry, Snapshot};
 /// 比较阶段只产生任务，不直接修改文件系统。这样可以支持 dry-run、统计、
 /// 重试和后续更复杂的调度策略。
 pub fn build_plan(config: &SyncConfig, source: &Snapshot, target: &Snapshot) -> Result<SyncPlan> {
+    let endpoints = SyncEndpoints::local(config.source.clone(), config.target.clone());
+    build_plan_with_endpoints(config, &endpoints, source, target)
+}
+
+/// 使用显式端点生成同步计划。
+///
+/// 该入口把内容比较委托给端点层，避免比较阶段绑定本地文件系统路径。
+pub fn build_plan_with_endpoints(
+    config: &SyncConfig,
+    endpoints: &SyncEndpoints,
+    source: &Snapshot,
+    target: &Snapshot,
+) -> Result<SyncPlan> {
     let mut plan = SyncPlan::default();
 
     for source_entry in source.entries.values() {
@@ -24,7 +37,7 @@ pub fn build_plan(config: &SyncConfig, source: &Snapshot, target: &Snapshot) -> 
                     ensure_same_kind(source_entry, target_entry)?;
                 }
             }
-            EntryKind::File => plan_file(config, source_entry, target, &mut plan)?,
+            EntryKind::File => plan_file(config, endpoints, source_entry, target, &mut plan)?,
             EntryKind::Symlink => {}
         }
     }
@@ -57,6 +70,7 @@ pub fn build_plan(config: &SyncConfig, source: &Snapshot, target: &Snapshot) -> 
 
 fn plan_file(
     config: &SyncConfig,
+    endpoints: &SyncEndpoints,
     source_entry: &FileEntry,
     target: &Snapshot,
     plan: &mut SyncPlan,
@@ -72,7 +86,9 @@ fn plan_file(
 
     ensure_same_kind(source_entry, target_entry)?;
 
-    if let Some(reason) = content_change_reason(config, source_entry, target_entry, plan)? {
+    if let Some(reason) =
+        content_change_reason(config, endpoints, source_entry, target_entry, plan)?
+    {
         plan.push(PlanOperation::CopyFile {
             relative_path: source_entry.relative_path.clone(),
             bytes: source_entry.len,
@@ -91,6 +107,7 @@ fn plan_file(
 
 fn content_change_reason(
     config: &SyncConfig,
+    endpoints: &SyncEndpoints,
     source_entry: &FileEntry,
     target_entry: &FileEntry,
     plan: &mut SyncPlan,
@@ -101,7 +118,7 @@ fn content_change_reason(
                 Ok(None)
             } else if source_entry.len != target_entry.len {
                 Ok(Some(CopyReason::MetadataChanged))
-            } else if same_content_by_blake3(source_entry, target_entry, plan)? {
+            } else if same_content_by_blake3(endpoints, source_entry, target_entry, plan)? {
                 Ok(None)
             } else {
                 Ok(Some(CopyReason::ContentChanged))
@@ -110,7 +127,7 @@ fn content_change_reason(
         CompareMode::Strict => {
             if source_entry.len != target_entry.len {
                 Ok(Some(CopyReason::MetadataChanged))
-            } else if same_content_by_blake3(source_entry, target_entry, plan)? {
+            } else if same_content_by_blake3(endpoints, source_entry, target_entry, plan)? {
                 Ok(None)
             } else {
                 Ok(Some(CopyReason::ContentChanged))
@@ -120,12 +137,13 @@ fn content_change_reason(
 }
 
 fn same_content_by_blake3(
+    endpoints: &SyncEndpoints,
     source_entry: &FileEntry,
     target_entry: &FileEntry,
     plan: &mut SyncPlan,
 ) -> Result<bool> {
     plan.record_blake3_comparison();
-    same_blake3(&source_entry.absolute_path, &target_entry.absolute_path)
+    endpoints.same_content(source_entry, target_entry)
 }
 
 fn ensure_same_kind(source: &FileEntry, target: &FileEntry) -> Result<()> {
