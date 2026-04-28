@@ -12,7 +12,6 @@ documentation = "https://docs.rs/fastsync"
 readme = "README.md"
 keywords = ["sync", "directory", "backup", "blake3", "cli"]
 categories = ["command-line-utilities"]
-exclude = [".codex", ".codex/", ".github/", ".vscode/", "AGENTS.md"]
 
 [dependencies]
 blake3 = "1.5"
