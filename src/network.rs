@@ -20,7 +20,7 @@ use crate::i18n::{Language, set_language, tr};
 use crate::summary::{human_bytes, human_duration};
 
 const DEFAULT_BIND_PORT: u16 = 7443;
-const PROTOCOL_VERSION: u16 = 3;
+const PROTOCOL_VERSION: u16 = 4;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const BUFFER_SIZE: usize = 1024 * 1024;
 
@@ -857,25 +857,8 @@ async fn finish_send_stream(send: &mut SendStream) -> Result<()> {
 }
 
 async fn send_tree(root: &Path, send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
-    let manifest = build_manifest(root)?;
-    info!(
-        root = %root.display(),
-        dirs = manifest.dirs.len(),
-        files = manifest.files.len(),
-        bytes = manifest.files.iter().map(|file| file.len).sum::<u64>(),
-        "sending manifest"
-    );
-    write_message(send, &WireMessage::Manifest(manifest.clone())).await?;
-    let requested_paths = match read_message(recv).await? {
-        WireMessage::RequestFiles { paths } => paths,
-        _ => {
-            return Err(other_message(
-                "read requested network files",
-                "unexpected message",
-            ));
-        }
-    };
-    let mut requested: HashSet<_> = requested_paths.into_iter().collect();
+    let manifest = send_manifest(root, send).await?;
+    let mut requested = read_requested_paths(recv).await?;
 
     let mut total_bytes = 0_u64;
     let mut sent_files = 0_usize;
@@ -911,16 +894,76 @@ async fn send_tree(root: &Path, send: &mut SendStream, recv: &mut RecvStream) ->
     Ok(())
 }
 
+async fn send_manifest(root: &Path, send: &mut SendStream) -> Result<Manifest> {
+    let snapshot = crate::scan::scan_directory(root, false)?;
+    let mut manifest = Manifest {
+        dirs: Vec::new(),
+        files: Vec::new(),
+    };
+
+    write_message(send, &WireMessage::ManifestStart).await?;
+    for entry in snapshot.entries.values() {
+        match entry.kind {
+            crate::scan::EntryKind::Directory => {
+                let dir = DirManifest {
+                    path: entry.relative_path.clone(),
+                    metadata: WireMetadata::from_entry(entry),
+                };
+                write_message(send, &WireMessage::ManifestDir(dir.clone())).await?;
+                manifest.dirs.push(dir);
+            }
+            crate::scan::EntryKind::File => {
+                let digest = crate::hash::blake3_file(&entry.absolute_path)?;
+                let file = FileManifest {
+                    path: entry.relative_path.clone(),
+                    len: entry.len,
+                    blake3: hex_digest(digest),
+                    metadata: WireMetadata::from_entry(entry),
+                };
+                write_message(send, &WireMessage::ManifestFile(file.clone())).await?;
+                manifest.files.push(file);
+            }
+            crate::scan::EntryKind::Symlink => {}
+        }
+    }
+    write_message(send, &WireMessage::ManifestEnd).await?;
+
+    info!(
+        root = %root.display(),
+        dirs = manifest.dirs.len(),
+        files = manifest.files.len(),
+        bytes = manifest.files.iter().map(|file| file.len).sum::<u64>(),
+        "sent manifest"
+    );
+    Ok(manifest)
+}
+
+async fn read_requested_paths(recv: &mut RecvStream) -> Result<HashSet<PathBuf>> {
+    let mut requested = HashSet::new();
+    loop {
+        match read_message(recv).await? {
+            WireMessage::RequestFile { path } => {
+                requested.insert(path);
+            }
+            WireMessage::RequestEnd => break,
+            _ => {
+                return Err(other_message(
+                    "read requested network files",
+                    "unexpected message",
+                ));
+            }
+        }
+    }
+    Ok(requested)
+}
+
 async fn receive_tree(
     root: &Path,
     recv: &mut RecvStream,
     send: &mut SendStream,
     options: TransferOptions,
 ) -> Result<ReceiveSummary> {
-    let manifest = match read_message(recv).await? {
-        WireMessage::Manifest(manifest) => manifest,
-        _ => return Err(other_message("receive manifest", "unexpected message")),
-    };
+    let manifest = receive_manifest(root, recv, options).await?;
     info!(
         root = %root.display(),
         dirs = manifest.dirs.len(),
@@ -928,30 +971,13 @@ async fn receive_tree(
         bytes = manifest.files.iter().map(|file| file.len).sum::<u64>(),
         "receiving manifest"
     );
-    tokio::fs::create_dir_all(root)
-        .await
-        .map_err(|error| io_path("create receive root", root, error))?;
-    for dir in &manifest.dirs {
-        let path = safe_join(root, &dir.path)?;
-        ensure_directory_path(&path, options.delete).await?;
-        tokio::fs::create_dir_all(&path)
-            .await
-            .map_err(|error| io_path("create received directory", &path, error))?;
-    }
-    let requested_files = request_files_for_local_state(root, &manifest, options.strict)?;
+    let requested_files = send_file_requests(root, &manifest, options.strict, send).await?;
     info!(
-        requested_files = requested_files.len(),
-        skipped_files = manifest.files.len().saturating_sub(requested_files.len()),
+        requested_files,
+        skipped_files = manifest.files.len().saturating_sub(requested_files),
         strict = options.strict,
         "planned network file requests"
     );
-    write_message(
-        send,
-        &WireMessage::RequestFiles {
-            paths: requested_files,
-        },
-    )
-    .await?;
 
     let mut files = 0_usize;
     let mut bytes = 0_u64;
@@ -986,6 +1012,87 @@ async fn receive_tree(
     })
 }
 
+async fn receive_manifest(
+    root: &Path,
+    recv: &mut RecvStream,
+    options: TransferOptions,
+) -> Result<Manifest> {
+    match read_message(recv).await? {
+        WireMessage::ManifestStart => {}
+        _ => return Err(other_message("receive manifest", "unexpected message")),
+    }
+
+    tokio::fs::create_dir_all(root)
+        .await
+        .map_err(|error| io_path("create receive root", root, error))?;
+
+    let mut manifest = Manifest {
+        dirs: Vec::new(),
+        files: Vec::new(),
+    };
+    loop {
+        match read_message(recv).await? {
+            WireMessage::ManifestDir(dir) => {
+                let path = safe_join(root, &dir.path)?;
+                ensure_directory_path(&path, options.delete).await?;
+                tokio::fs::create_dir_all(&path)
+                    .await
+                    .map_err(|error| io_path("create received directory", &path, error))?;
+                manifest.dirs.push(dir);
+            }
+            WireMessage::ManifestFile(file) => manifest.files.push(file),
+            WireMessage::ManifestEnd => break,
+            _ => return Err(other_message("receive manifest", "unexpected message")),
+        }
+    }
+
+    Ok(manifest)
+}
+
+async fn send_file_requests(
+    root: &Path,
+    manifest: &Manifest,
+    strict: bool,
+    send: &mut SendStream,
+) -> Result<usize> {
+    let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
+        Ok(snapshot) => snapshot,
+        Err(FastSyncError::InvalidTarget(path)) if path == root => {
+            let mut requested = 0_usize;
+            for file in &manifest.files {
+                write_message(
+                    send,
+                    &WireMessage::RequestFile {
+                        path: file.path.clone(),
+                    },
+                )
+                .await?;
+                requested += 1;
+            }
+            write_message(send, &WireMessage::RequestEnd).await?;
+            return Ok(requested);
+        }
+        Err(error) => return Err(error),
+    };
+
+    let mut requested = 0_usize;
+    for file in &manifest.files {
+        if should_request_file(&target_snapshot, file, strict)? {
+            write_message(
+                send,
+                &WireMessage::RequestFile {
+                    path: file.path.clone(),
+                },
+            )
+            .await?;
+            requested += 1;
+        }
+    }
+    write_message(send, &WireMessage::RequestEnd).await?;
+    Ok(requested)
+}
+
+#[cfg(test)]
 fn request_files_for_local_state(
     root: &Path,
     manifest: &Manifest,
@@ -1005,27 +1112,33 @@ fn request_files_for_local_state(
 
     let mut requested = Vec::new();
     for file in &manifest.files {
-        let Some(target_entry) = target_snapshot.get(&file.path) else {
-            requested.push(file.path.clone());
-            continue;
-        };
-
-        if !target_entry.is_file() || target_entry.len != file.len {
-            requested.push(file.path.clone());
-            continue;
-        }
-
-        if !strict && content_metadata_matches(target_entry, &file.metadata) {
-            continue;
-        }
-
-        let digest = crate::hash::blake3_file(&target_entry.absolute_path)?;
-        if hex_digest(digest) != file.blake3 {
+        if should_request_file(&target_snapshot, file, strict)? {
             requested.push(file.path.clone());
         }
     }
 
     Ok(requested)
+}
+
+fn should_request_file(
+    target_snapshot: &crate::scan::Snapshot,
+    file: &FileManifest,
+    strict: bool,
+) -> Result<bool> {
+    let Some(target_entry) = target_snapshot.get(&file.path) else {
+        return Ok(true);
+    };
+
+    if !target_entry.is_file() || target_entry.len != file.len {
+        return Ok(true);
+    }
+
+    if !strict && content_metadata_matches(target_entry, &file.metadata) {
+        Ok(false)
+    } else {
+        let digest = crate::hash::blake3_file(&target_entry.absolute_path)?;
+        Ok(hex_digest(digest) != file.blake3)
+    }
 }
 
 fn content_metadata_matches(entry: &crate::scan::FileEntry, metadata: &WireMetadata) -> bool {
@@ -1065,6 +1178,7 @@ fn metadata_permissions_match(entry: &crate::scan::FileEntry, metadata: &WireMet
     }
 }
 
+#[cfg(test)]
 fn build_manifest(root: &Path) -> Result<Manifest> {
     let snapshot = crate::scan::scan_directory(root, false)?;
     let mut dirs = Vec::new();
@@ -1143,7 +1257,7 @@ async fn receive_file(
     let mut buffer = vec![0_u8; BUFFER_SIZE];
 
     while remaining > 0 {
-        let read_len = buffer.len().min(remaining as usize);
+        let read_len = next_chunk_len(remaining, buffer.len());
         let Some(read) = recv
             .read(&mut buffer[..read_len])
             .await
@@ -1200,6 +1314,14 @@ async fn receive_file(
         }
     }?;
     apply_path_metadata(&target, &file.metadata, options)
+}
+
+fn next_chunk_len(remaining: u64, buffer_len: usize) -> usize {
+    if remaining > buffer_len as u64 {
+        buffer_len
+    } else {
+        remaining as usize
+    }
 }
 
 async fn ensure_directory_path(path: &Path, delete_enabled: bool) -> Result<()> {
@@ -1675,11 +1797,15 @@ enum WireMessage {
     Reject {
         reason: String,
     },
-    Manifest(Manifest),
-    RequestFiles {
-        #[serde(with = "wire_paths")]
-        paths: Vec<PathBuf>,
+    ManifestStart,
+    ManifestDir(DirManifest),
+    ManifestFile(FileManifest),
+    ManifestEnd,
+    RequestFile {
+        #[serde(with = "wire_path")]
+        path: PathBuf,
     },
+    RequestEnd,
     File(FileManifest),
     Done,
     Ack {
@@ -1762,38 +1888,6 @@ mod wire_path {
     }
 }
 
-mod wire_paths {
-    use std::path::PathBuf;
-
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    /// 序列化客户端请求文件列表；每个路径都使用平台无关网络路径。
-    pub fn serialize<S>(paths: &[PathBuf], serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let values = paths
-            .iter()
-            .map(|path| super::wire_path::path_to_wire_string(path))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(serde::ser::Error::custom)?;
-        values.serialize(serializer)
-    }
-
-    /// 反序列化客户端请求文件列表；兼容旧版 Windows 反斜杠路径。
-    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Vec<PathBuf>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let values = Vec::<String>::deserialize(deserializer)?;
-        values
-            .iter()
-            .map(|value| super::wire_path::wire_string_to_path(value))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1824,15 +1918,15 @@ mod tests {
                 unix_mode: None,
             },
         };
-        let request = WireMessage::RequestFiles {
-            paths: vec![PathBuf::from("mc").join("Aaron.flac")],
+        let request = WireMessage::RequestFile {
+            path: PathBuf::from("mc").join("Aaron.flac"),
         };
 
         let file_json = serde_json::to_string(&file)?;
         let request_json = serde_json::to_string(&request)?;
 
         assert!(file_json.contains(r#""path":"mc/Aaron.flac""#));
-        assert!(request_json.contains(r#""paths":["mc/Aaron.flac"]"#));
+        assert!(request_json.contains(r#""path":"mc/Aaron.flac""#));
         Ok(())
     }
 
@@ -1850,17 +1944,17 @@ mod tests {
                 "unix_mode":null
             }
         }"#;
-        let request_json = r#"{"type":"request_files","paths":["mc\\Aaron.flac"]}"#;
+        let request_json = r#"{"type":"request_file","path":"mc\\Aaron.flac"}"#;
 
         let file = serde_json::from_str::<FileManifest>(file_json)?;
         let request = serde_json::from_str::<WireMessage>(request_json)?;
 
         assert_eq!(file.path, PathBuf::from("mc").join("Aaron.flac"));
         match request {
-            WireMessage::RequestFiles { paths } => {
-                assert_eq!(paths, vec![PathBuf::from("mc").join("Aaron.flac")]);
+            WireMessage::RequestFile { path } => {
+                assert_eq!(path, PathBuf::from("mc").join("Aaron.flac"));
             }
-            _ => panic!("expected request_files message"),
+            _ => panic!("expected request_file message"),
         }
         Ok(())
     }
@@ -1880,6 +1974,48 @@ mod tests {
         }"#;
 
         assert!(serde_json::from_str::<FileManifest>(file_json).is_err());
+    }
+
+    #[test]
+    fn streaming_manifest_keeps_each_message_small()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let files: Vec<_> = (0..20_000)
+            .map(|index| FileManifest {
+                path: PathBuf::from("album").join(format!("track-{index:05}.flac")),
+                len: 12_345,
+                blake3: "0".repeat(64),
+                metadata: WireMetadata {
+                    modified_secs: Some(1_700_000_000),
+                    modified_nanos: Some(0),
+                    readonly: false,
+                    unix_mode: None,
+                },
+            })
+            .collect();
+        let old_payload = serde_json::to_vec(&Manifest {
+            dirs: Vec::new(),
+            files: files.clone(),
+        })?;
+
+        let largest_stream_item = files
+            .iter()
+            .map(|file| serde_json::to_vec(&WireMessage::ManifestFile(file.clone())))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|payload| payload.len())
+            .max()
+            .expect("test manifest should contain files");
+
+        assert!(old_payload.len() > MAX_MESSAGE_SIZE);
+        assert!(largest_stream_item < MAX_MESSAGE_SIZE);
+        Ok(())
+    }
+
+    #[test]
+    fn next_chunk_len_handles_remaining_larger_than_usize() {
+        assert_eq!(next_chunk_len(u64::MAX, 1024), 1024);
+        assert_eq!(next_chunk_len(512, 1024), 512);
+        assert_eq!(next_chunk_len(0, 1024), 0);
     }
 
     #[test]
