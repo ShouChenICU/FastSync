@@ -12,6 +12,7 @@ pub mod error;
 pub mod executor;
 pub mod hash;
 pub mod i18n;
+pub mod network;
 pub mod plan;
 pub mod scan;
 pub mod summary;

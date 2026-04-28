@@ -157,7 +157,7 @@ fn paint(enabled: bool, code: &str, text: &str) -> String {
     }
 }
 
-fn human_bytes(bytes: u64) -> String {
+pub(crate) fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
     let mut unit = UNITS[0];
@@ -179,7 +179,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn human_duration(duration_ms: u128) -> String {
+pub(crate) fn human_duration(duration_ms: u128) -> String {
     if duration_ms < 1_000 {
         format!("{duration_ms} ms")
     } else {

@@ -12,7 +12,7 @@ Mirror a source folder into a target folder with speed, clear previews, and safe
 [![BLAKE3](https://img.shields.io/badge/Compare-BLAKE3-brightgreen.svg)](https://github.com/BLAKE3-team/BLAKE3)
 [![GitHub](https://img.shields.io/badge/GitHub-ShouChenICU%2FFastSync-black.svg)](https://github.com/ShouChenICU/FastSync)
 
-[简体中文](README.zh-CN.md) · [Extreme Performance](#-extreme-performance) · [Safety](#-safety-first-by-default) · [Install](#-install) · [Language](#-language) · [CLI](#-cli-cheat-sheet)
+[简体中文](README.zh-CN.md) · [Extreme Performance](#-extreme-performance) · [Network Sync](#-share-or-receive-a-folder-once) · [Safety](#-safety-first-by-default) · [Install](#-install) · [CLI](#-cli-cheat-sheet)
 
 </div>
 
@@ -121,14 +121,16 @@ FASTSYNC_LANG=zh-CN fastsync --help
 
 ## 🧭 Common Workflows
 
-| Goal                               | Command                               |
-| ---------------------------------- | ------------------------------------- |
-| Preview a sync                     | `fastsync -n ./source ./target`       |
-| Sync one folder into another       | `fastsync ./source ./target`          |
-| Sync and delete stale target files | `fastsync -d ./source ./target`       |
-| Use strict comparison              | `fastsync --strict ./source ./target` |
-| Limit worker threads               | `fastsync -t 4 ./source ./target`     |
-| Output JSON for scripts            | `fastsync -o json ./source ./target`  |
+| Goal                               | Command                                                     |
+| ---------------------------------- | ----------------------------------------------------------- |
+| Preview a sync                     | `fastsync -n ./source ./target`                             |
+| Sync one folder into another       | `fastsync ./source ./target`                                |
+| Sync and delete stale target files | `fastsync -d ./source ./target`                             |
+| Use strict comparison              | `fastsync --strict ./source ./target`                       |
+| Limit worker threads               | `fastsync -t 4 ./source ./target`                           |
+| Output JSON for scripts            | `fastsync -o json ./source ./target`                        |
+| Share a folder once                | `fastsync s ./source`                                       |
+| Receive a shared folder            | `fastsync c host ./target -c 123456`                        |
 
 <details>
 <summary><strong>Example: safe backup mirror</strong></summary>
@@ -153,6 +155,74 @@ fastsync ./target/release ./cache/release
 The default fast mode trusts matching metadata, then hashes only when same-size files have differing modified times or supported permissions.
 
 </details>
+
+## 🌐 Share or Receive a Folder Once
+
+Use this for a temporary handoff: send a folder to someone, or let them upload one to you. The person sharing the folder starts `share`, reads out the one-time code, and the other side runs `connect`.
+
+> [!IMPORTANT]
+> This is one-way sync. Choose download or upload for each session; FastSync does not merge changes from both sides.
+
+Send a folder to someone:
+
+```bash
+fastsync s ./photos
+fastsync c server.example.com ./photos -c 123456
+```
+
+Let someone upload a folder to you:
+
+```bash
+fastsync s ./inbox -r
+fastsync c server.example.com ./project -u -c 123456
+```
+
+What happens by default:
+
+| Default            | Meaning                                                                     |
+| ------------------ | --------------------------------------------------------------------------- |
+| share sends files  | `fastsync s ./photos` only lets the other side download.                    |
+| one-time code      | FastSync prints a code when sharing starts.                                 |
+| one successful use | The sharing side exits after one completed sync.                            |
+| no server deletion | Upload clients cannot delete your files unless you explicitly allow it.     |
+
+You can omit `--code`; FastSync will prompt for it.
+
+Common shortcuts:
+
+| Full form            | Shortcut           |
+| -------------------- | ------------------ |
+| `share` / `connect`  | `s` / `c`          |
+| `--code 123456`      | `-c 123456`        |
+| `--mode receive`     | `-r` or `-m r`     |
+| `--direction push`   | `-u`               |
+| `--delete`           | `-d`               |
+| `--allow-delete`     | `-a`               |
+| `--preserve-permissions` | `-p` or `--perms` |
+
+Deleting extra files is always opt-in and only affects the side receiving files:
+
+| When you choose | `--delete` can delete              | Extra requirement                |
+| --------------- | ---------------------------------- | -------------------------------- |
+| download        | Extra files in your local folder   | None                             |
+| upload          | Extra files in the shared folder   | Sharing side must allow deletion |
+
+```bash
+fastsync c server.example.com ./photos -d -c 123456
+fastsync s ./inbox -r -a
+fastsync c server.example.com ./project -u -d -c 123456
+```
+
+By default, received files keep their modification times. Permission bits are copied only when requested:
+
+| Option                   | Meaning                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------- |
+| `--no-preserve-times`    | Do not preserve source modification times on received files and directories.            |
+| `--preserve-permissions` | Preserve source permission bits on received files and directories. Disabled by default. |
+
+For auditing, the sharing side logs who connected, whether the session downloaded or uploaded, delete/metadata choices, pairing failures, file count, byte count, deleted count, and elapsed time. Use `--log-level debug` for more detail.
+
+Technical note: one-shot network sync uses QUIC with a temporary self-signed certificate, verifies received files with BLAKE3, and writes through temporary files before replacement. Use it for short-lived sessions where both sides can confirm the address and code.
 
 ## 🛡️ Safety First By Default
 
@@ -211,10 +281,23 @@ New files that do not exist in the target are copied directly and are not counte
 | `-l`, `--log-level <level>`                  | Set log verbosity.                                                        |
 | `--lang <en\|zh-CN>`                         | Select interface language. Also accepts common locale aliases.            |
 
-Print the full help page:
+Network one-shot commands:
+
+| Command                                   | Meaning                                                        |
+| ----------------------------------------- | -------------------------------------------------------------- |
+| `fastsync share <DIRECTORY>`              | Start a temporary server. Defaults to `--mode send`.           |
+| `fastsync connect <ENDPOINT> <DIRECTORY>` | Connect to a temporary server. Defaults to `--direction pull`. |
+| `fastsync s <DIRECTORY>`                  | Short form of `fastsync share`.                                |
+| `fastsync c <ENDPOINT> <DIRECTORY>`       | Short form of `fastsync connect`.                              |
+| `fastsync share --help`                   | Show all server options.                                       |
+| `fastsync connect --help`                 | Show all client options.                                       |
+
+Print the full help pages:
 
 ```bash
 fastsync --help
+fastsync share --help
+fastsync connect --help
 ```
 
 Running `fastsync` without arguments also prints help.

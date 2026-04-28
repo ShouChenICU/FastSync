@@ -78,6 +78,19 @@ cli.help:
 cli.version:
   en: "Print version."
   zh-CN: "输出版本。"
+cli.network_help:
+  en: |-
+    Network one-shot commands:
+      fastsync s <DIRECTORY> [-r|-m send|receive|both] [-a]
+      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d]
+
+    Use `fastsync share --help` or `fastsync connect --help` for network sync details.
+  zh-CN: |-
+    一次性网络同步命令：
+      fastsync s <DIRECTORY> [-r|-m send|receive|both] [-a]
+      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d]
+
+    使用 `fastsync share --help` 或 `fastsync connect --help` 查看网络同步详情。
 
 value.compare.fast:
   en: "Trust metadata when it matches; when metadata differs but sizes match, use BLAKE3 to confirm content."
@@ -113,6 +126,112 @@ app.help_print_failed:
 app.json_summary_failed:
   en: "failed to serialize JSON summary"
   zh-CN: "序列化 JSON 摘要失败"
+
+network.share.about:
+  en: "Start a one-shot QUIC directory sharing session."
+  zh-CN: "启动一次性 QUIC 目录共享会话。"
+network.share.directory:
+  en: "Server-side directory to share. The client cannot choose this path."
+  zh-CN: "服务端要共享的目录。客户端不能选择该路径。"
+network.share.bind:
+  en: "UDP address to listen on."
+  zh-CN: "监听的 UDP 地址。"
+network.share.mode:
+  en: "Server permission mode: send, receive, or both. Short values: s, r, b. Defaults to send."
+  zh-CN: "服务端权限模式：send、receive 或 both。短值：s、r、b。默认 send。"
+network.share.receive:
+  en: "Shortcut for --mode receive."
+  zh-CN: "--mode receive 的快捷方式。"
+network.share.both:
+  en: "Shortcut for --mode both."
+  zh-CN: "--mode both 的快捷方式。"
+network.share.code:
+  en: "Use a specific 6-digit one-time pairing code instead of generating one."
+  zh-CN: "指定 6 位数字的一次性配对验证码，而不是自动生成。"
+network.share.allow_delete:
+  en: "Allow clients to delete extra entries on the server when they push with --delete. Disabled by default."
+  zh-CN: "允许客户端在 push 且使用 --delete 时删除服务端多余项。默认关闭。"
+network.share.max_failures:
+  en: "Maximum failed pairing attempts before the server exits."
+  zh-CN: "服务端退出前允许的最大配对失败次数。"
+network.share.started:
+  en: "fastsync one-shot share started"
+  zh-CN: "fastsync 一次性共享已启动"
+network.connect.about:
+  en: "Connect to a one-shot QUIC directory sharing session."
+  zh-CN: "连接一次性 QUIC 目录共享会话。"
+network.connect.endpoint:
+  en: "Sharing-side address, for example host, host:7443, or quic://host:7443."
+  zh-CN: "共享方地址，例如 host、host:7443 或 quic://host:7443。"
+network.connect.directory:
+  en: "Client-side local directory."
+  zh-CN: "客户端本地目录。"
+network.connect.direction:
+  en: "Sync direction: pull from server or push to server. Short values: p, u."
+  zh-CN: "同步方向：从共享方下载 pull，或上传到共享方 push。短值：p、u。"
+network.connect.push:
+  en: "Upload local files to the sharing side. Shortcut for --direction push."
+  zh-CN: "上传本地目录到共享方，等价于 --direction push。"
+network.connect.pull:
+  en: "Download files from the sharing side. This is the default."
+  zh-CN: "从共享方下载目录，这是默认行为。"
+network.connect.code:
+  en: "6-digit one-time pairing code. If omitted, fastsync prompts for it."
+  zh-CN: "6 位数字的一次性配对验证码。省略时会交互输入。"
+network.connect.delete:
+  en: "Delete extra entries in the receiving directory. For push, the server must also allow deletion."
+  zh-CN: "删除接收目录中的多余项。push 时服务端也必须允许删除。"
+network.connect.no_preserve_times:
+  en: "Do not preserve source modification times on received files and directories."
+  zh-CN: "不在接收的文件和目录上保留源端修改时间。"
+network.connect.preserve_permissions:
+  en: "Preserve source permission bits on received files and directories. Disabled by default."
+  zh-CN: "在接收的文件和目录上保留源端权限位。默认关闭。"
+network.summary.title:
+  en: "network sync complete"
+  zh-CN: "网络同步完成"
+network.summary.session:
+  en: "Session"
+  zh-CN: "会话"
+network.summary.result:
+  en: "Result"
+  zh-CN: "结果"
+network.summary.side:
+  en: "Side"
+  zh-CN: "角色"
+network.summary.side_share:
+  en: "sharing side"
+  zh-CN: "共享方"
+network.summary.side_connect:
+  en: "connecting side"
+  zh-CN: "连接方"
+network.summary.direction:
+  en: "Direction"
+  zh-CN: "方向"
+network.summary.direction_pull:
+  en: "download"
+  zh-CN: "下载"
+network.summary.direction_push:
+  en: "upload"
+  zh-CN: "上传"
+network.summary.directory:
+  en: "Directory"
+  zh-CN: "目录"
+network.summary.remote:
+  en: "Remote"
+  zh-CN: "对端"
+network.summary.files:
+  en: "Files"
+  zh-CN: "文件"
+network.summary.data:
+  en: "Data"
+  zh-CN: "数据量"
+network.summary.deleted:
+  en: "Deleted"
+  zh-CN: "删除"
+network.summary.duration:
+  en: "Duration"
+  zh-CN: "耗时"
 
 summary.status.dry_run_done:
   en: "Dry run complete"

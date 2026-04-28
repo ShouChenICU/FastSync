@@ -25,6 +25,15 @@ fastsync is a fast directory synchronization tool written in Rust for large dire
 - Encapsulate I/O, concurrency, hashing, and path handling logic into testable units instead of piling complex behavior into entry points.
 - Base performance optimization on measurement. For large files, prefer streaming reads and avoid loading whole files into memory.
 
+## Internationalization
+
+- fastsync supports English and Simplified Chinese. Keep user-facing CLI help, text summaries, errors, I/O contexts, and log messages internationalized through `src/i18n.rs` and `locales/app.yml`.
+- Do not hard-code new user-facing English or Chinese strings in core modules. Add translation keys to `locales/app.yml` and access them through the existing i18n helpers.
+- JSON output field names and other machine-readable schema keys must stay stable and untranslated.
+- Language selection priority is `--lang`, then `FASTSYNC_LANG`, then system locale variables (`LC_ALL`, `LC_MESSAGES`, `LANGUAGE`, `LANG`), then English fallback. Preserve common locale alias compatibility such as `zh_CN.UTF-8` and `zh-Hans-CN`.
+- When adding CLI options or value enums, localize both the option help and possible-value help. Keep `--lang <en|zh-CN>` as the public canonical form while accepting compatible aliases.
+- When changing translated output, update or add focused tests for default English, Simplified Chinese, and locale alias behavior where relevant.
+
 ## Rust Conventions
 
 - `cargo fmt`, `cargo clippy`, `cargo test`, and `cargo check` should pass by default.

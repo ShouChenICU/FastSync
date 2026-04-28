@@ -99,7 +99,9 @@ impl Cli {
         let arguments = static_text(tr(language, "cli.arguments"));
         let options = static_text(tr(language, "cli.options"));
         let usage = tr(language, "cli.usage");
-        let help_template = format!("{{about-with-newline}}\n{usage}: {{usage}}\n\n{{all-args}}");
+        let network_help = static_text(tr(language, "cli.network_help"));
+        let help_template =
+            format!("{{about-with-newline}}\n{usage}: {{usage}}\n\n{{all-args}}\n{{after-help}}");
 
         Command::new("fastsync")
             .version(env!("CARGO_PKG_VERSION"))
@@ -107,6 +109,7 @@ impl Cli {
             .disable_help_flag(true)
             .disable_version_flag(true)
             .help_template(help_template)
+            .after_help(network_help)
             .arg(
                 Arg::new("source")
                     .value_name("SOURCE")
