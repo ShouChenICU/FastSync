@@ -1605,12 +1605,14 @@ struct Manifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DirManifest {
+    #[serde(with = "wire_path")]
     path: PathBuf,
     metadata: WireMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FileManifest {
+    #[serde(with = "wire_path")]
     path: PathBuf,
     len: u64,
     blake3: String,
@@ -1675,6 +1677,7 @@ enum WireMessage {
     },
     Manifest(Manifest),
     RequestFiles {
+        #[serde(with = "wire_paths")]
         paths: Vec<PathBuf>,
     },
     File(FileManifest),
@@ -1684,6 +1687,111 @@ enum WireMessage {
         bytes: u64,
         deleted: usize,
     },
+}
+
+mod wire_path {
+    use std::path::{Component, Path, PathBuf};
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// 将平台相关相对路径编码成 `/` 分隔的网络路径，避免 Windows `\` 泄漏到 Android/Linux。
+    pub fn serialize<S>(path: &Path, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let path = path_to_wire_string(path).map_err(serde::ser::Error::custom)?;
+        serializer.serialize_str(&path)
+    }
+
+    /// 解码网络相对路径；兼容旧版本 Windows 端发送的 `\` 分隔路径。
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<PathBuf, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        wire_string_to_path(&value).map_err(serde::de::Error::custom)
+    }
+
+    pub fn path_to_wire_string(path: &Path) -> std::result::Result<String, String> {
+        let mut components = Vec::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(value) => {
+                    let Some(value) = value.to_str() else {
+                        return Err("network paths must be valid UTF-8".to_string());
+                    };
+                    if value.contains(['/', '\\']) {
+                        return Err("network path components cannot contain separators".to_string());
+                    }
+                    components.push(value);
+                }
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(
+                        "network paths must be relative and stay inside the root".to_string()
+                    );
+                }
+            }
+        }
+
+        if components.is_empty() {
+            return Err("network path cannot be empty".to_string());
+        }
+        Ok(components.join("/"))
+    }
+
+    pub fn wire_string_to_path(value: &str) -> std::result::Result<PathBuf, String> {
+        if value.is_empty() {
+            return Err("network path cannot be empty".to_string());
+        }
+
+        let mut path = PathBuf::new();
+        for component in value.split(['/', '\\']) {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err("network paths must be relative and stay inside the root".to_string());
+            }
+            if Path::new(component)
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+            {
+                return Err("network path components cannot contain separators".to_string());
+            }
+            path.push(component);
+        }
+        Ok(path)
+    }
+}
+
+mod wire_paths {
+    use std::path::PathBuf;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// 序列化客户端请求文件列表；每个路径都使用平台无关网络路径。
+    pub fn serialize<S>(paths: &[PathBuf], serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let values = paths
+            .iter()
+            .map(|path| super::wire_path::path_to_wire_string(path))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(serde::ser::Error::custom)?;
+        values.serialize(serializer)
+    }
+
+    /// 反序列化客户端请求文件列表；兼容旧版 Windows 反斜杠路径。
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Vec<PathBuf>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let values = Vec::<String>::deserialize(deserializer)?;
+        values
+            .iter()
+            .map(|value| super::wire_path::wire_string_to_path(value))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]
@@ -1700,6 +1808,78 @@ mod tests {
     fn safe_join_rejects_escape_paths() {
         assert!(safe_join(Path::new("/tmp/root"), Path::new("../x")).is_err());
         assert!(safe_join(Path::new("/tmp/root"), Path::new("/x")).is_err());
+    }
+
+    #[test]
+    fn wire_paths_serialize_with_forward_slashes()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let file = FileManifest {
+            path: PathBuf::from("mc").join("Aaron.flac"),
+            len: 0,
+            blake3: String::new(),
+            metadata: WireMetadata {
+                modified_secs: None,
+                modified_nanos: None,
+                readonly: false,
+                unix_mode: None,
+            },
+        };
+        let request = WireMessage::RequestFiles {
+            paths: vec![PathBuf::from("mc").join("Aaron.flac")],
+        };
+
+        let file_json = serde_json::to_string(&file)?;
+        let request_json = serde_json::to_string(&request)?;
+
+        assert!(file_json.contains(r#""path":"mc/Aaron.flac""#));
+        assert!(request_json.contains(r#""paths":["mc/Aaron.flac"]"#));
+        Ok(())
+    }
+
+    #[test]
+    fn wire_paths_accept_legacy_windows_separators()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let file_json = r#"{
+            "path":"mc\\Aaron.flac",
+            "len":0,
+            "blake3":"",
+            "metadata":{
+                "modified_secs":null,
+                "modified_nanos":null,
+                "readonly":false,
+                "unix_mode":null
+            }
+        }"#;
+        let request_json = r#"{"type":"request_files","paths":["mc\\Aaron.flac"]}"#;
+
+        let file = serde_json::from_str::<FileManifest>(file_json)?;
+        let request = serde_json::from_str::<WireMessage>(request_json)?;
+
+        assert_eq!(file.path, PathBuf::from("mc").join("Aaron.flac"));
+        match request {
+            WireMessage::RequestFiles { paths } => {
+                assert_eq!(paths, vec![PathBuf::from("mc").join("Aaron.flac")]);
+            }
+            _ => panic!("expected request_files message"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wire_paths_reject_escape_paths() {
+        let file_json = r#"{
+            "path":"../x",
+            "len":0,
+            "blake3":"",
+            "metadata":{
+                "modified_secs":null,
+                "modified_nanos":null,
+                "readonly":false,
+                "unix_mode":null
+            }
+        }"#;
+
+        assert!(serde_json::from_str::<FileManifest>(file_json).is_err());
     }
 
     #[test]
