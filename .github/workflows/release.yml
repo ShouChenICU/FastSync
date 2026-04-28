@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: fastsync
+
+jobs:
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read package version
+        id: version
+        run: |
+          set -euo pipefail
+
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          if [[ -z "${version}" ]]; then
+            echo "Failed to read package version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${version}" >> "${GITHUB_OUTPUT}"
+
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy
+
+      - name: Check lockfile
+        run: cargo check --all-targets --all-features --locked
+
+      - name: Lint
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features --locked
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs:
+      - prepare
+      - verify
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        shell: bash
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Prepare release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          asset_name="${BINARY_NAME}-${RELEASE_TAG}-${{ matrix.target }}"
+          source_binary="target/${{ matrix.target }}/release/${BINARY_NAME}"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            source_binary="${source_binary}.exe"
+            asset_name="${asset_name}.exe"
+          fi
+
+          mkdir -p dist
+          asset="dist/${asset_name}"
+          cp "${source_binary}" "${asset}"
+          chmod +x "${asset}" || true
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${asset}" > "${asset}.sha256"
+          else
+            shasum -a 256 "${asset}" > "${asset}.sha256"
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastsync-${{ matrix.target }}
+          path: |
+            dist/fastsync-*
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: FastSync ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          overwrite_files: true
