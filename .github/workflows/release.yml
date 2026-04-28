@@ -35,8 +35,50 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=v${version}" >> "${GITHUB_OUTPUT}"
 
+  preflight:
+    name: Check release permission
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHECK_TAG: fastsync-release-permission-check-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Verify GitHub release write access
+        run: |
+          set -euo pipefail
+
+          release_id=""
+          cleanup() {
+            if [[ -n "${release_id}" ]]; then
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null 2>&1 || true
+            fi
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${CHECK_TAG}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          release_id="$(
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+              -f tag_name="${CHECK_TAG}" \
+              -f target_commitish="${GITHUB_SHA}" \
+              -f name="FastSync release permission check" \
+              -f body="Temporary release created by workflow preflight and deleted immediately." \
+              -F draft=true \
+              -F prerelease=true \
+              --jq '.id'
+          )"
+
+          if [[ -z "${release_id}" ]]; then
+            echo "Release permission check did not return a release id." >&2
+            exit 1
+          fi
+
+          echo "GitHub release write permission is available."
+
   verify:
     name: Verify
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -134,6 +176,8 @@ jobs:
       - prepare
       - build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download release assets
         uses: actions/download-artifact@v7
@@ -151,3 +195,4 @@ jobs:
           fail_on_unmatched_files: true
           generate_release_notes: true
           overwrite_files: true
+          token: ${{ github.token }}
