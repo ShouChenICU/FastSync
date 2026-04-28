@@ -1,4 +1,8 @@
+use std::error::Error;
+use std::fmt;
 use std::path::PathBuf;
+
+use crate::i18n::{tr_current, tr_many_errors, tr_path, tr_path_source_target, tr_value};
 
 /// fastsync 统一错误类型。
 ///
@@ -6,42 +10,114 @@ use std::path::PathBuf;
 /// 使用 `unwrap` 或丢失上下文。
 pub type Result<T> = std::result::Result<T, FastSyncError>;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum FastSyncError {
-    #[error("{context}: {source}")]
     Io {
         context: String,
-        #[source]
         source: std::io::Error,
     },
 
-    #[error("遍历目录失败: {0}")]
-    WalkDir(#[from] walkdir::Error),
+    WalkDir(walkdir::Error),
 
-    #[error("源目录不存在或不是目录: {0}")]
     InvalidSource(PathBuf),
 
-    #[error("目标路径已存在但不是目录: {0}")]
     InvalidTarget(PathBuf),
 
-    #[error("路径类型冲突: {relative_path}，源类型为 {source_kind}，目标类型为 {target_kind}")]
     PathTypeConflict {
         relative_path: PathBuf,
         source_kind: &'static str,
         target_kind: &'static str,
     },
 
-    #[error("路径不在扫描根目录内: {path}")]
-    PathOutsideRoot { path: PathBuf },
+    PathOutsideRoot {
+        path: PathBuf,
+    },
 
-    #[error("执行过程中发生 {count} 个错误，首个错误: {first}")]
-    Many { count: usize, first: String },
+    Many {
+        count: usize,
+        first: String,
+    },
 
-    #[error("复制后校验失败: {0}")]
     VerificationFailed(PathBuf),
 
-    #[error("不支持的同步对象类型: {0}")]
     UnsupportedEntry(PathBuf),
+}
+
+impl fmt::Display for FastSyncError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { context, source } => write!(formatter, "{context}: {source}"),
+            Self::WalkDir(error) => write!(formatter, "{}", tr_value("error.walk_dir", error)),
+            Self::InvalidSource(path) => {
+                write!(
+                    formatter,
+                    "{}",
+                    tr_path("error.invalid_source", path.display())
+                )
+            }
+            Self::InvalidTarget(path) => {
+                write!(
+                    formatter,
+                    "{}",
+                    tr_path("error.invalid_target", path.display())
+                )
+            }
+            Self::PathTypeConflict {
+                relative_path,
+                source_kind,
+                target_kind,
+            } => write!(
+                formatter,
+                "{}",
+                tr_path_source_target(
+                    "error.path_type_conflict",
+                    relative_path.display(),
+                    entry_kind_label(source_kind),
+                    entry_kind_label(target_kind)
+                )
+            ),
+            Self::PathOutsideRoot { path } => {
+                write!(
+                    formatter,
+                    "{}",
+                    tr_path("error.path_outside_root", path.display())
+                )
+            }
+            Self::Many { count, first } => {
+                write!(formatter, "{}", tr_many_errors(*count, first))
+            }
+            Self::VerificationFailed(path) => {
+                write!(
+                    formatter,
+                    "{}",
+                    tr_path("error.verification_failed", path.display())
+                )
+            }
+            Self::UnsupportedEntry(path) => {
+                write!(
+                    formatter,
+                    "{}",
+                    tr_path("error.unsupported_entry", path.display())
+                )
+            }
+        }
+    }
+}
+
+impl Error for FastSyncError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::WalkDir(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<walkdir::Error> for FastSyncError {
+    fn from(error: walkdir::Error) -> Self {
+        Self::WalkDir(error)
+    }
 }
 
 /// 为 I/O 错误补充当前操作语义，便于用户定位失败阶段和路径。
@@ -50,4 +126,13 @@ pub fn io_context<T>(context: impl Into<String>, result: std::io::Result<T>) -> 
         context: context.into(),
         source,
     })
+}
+
+fn entry_kind_label(kind: &str) -> String {
+    match kind {
+        "file" => tr_current("error.entry_kind.file"),
+        "directory" => tr_current("error.entry_kind.directory"),
+        "symlink" => tr_current("error.entry_kind.symlink"),
+        _ => kind.to_string(),
+    }
 }

@@ -3,6 +3,7 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use crate::error::{Result, io_context};
+use crate::i18n::tr_path;
 
 /// BLAKE3 摘要的固定长度字节表示。
 pub type Blake3Digest = [u8; 32];
@@ -12,7 +13,7 @@ pub type Blake3Digest = [u8; 32];
 /// 该函数不会一次性读取整个文件，适合大文件校验和比较。
 pub fn blake3_file(path: &Path) -> Result<Blake3Digest> {
     let file = io_context(
-        format!("打开文件用于哈希: {}", path.display()),
+        tr_path("io.open_file_for_hash", path.display()),
         File::open(path),
     )?;
     let mut reader = BufReader::with_capacity(1024 * 1024, file);
@@ -21,7 +22,7 @@ pub fn blake3_file(path: &Path) -> Result<Blake3Digest> {
 
     loop {
         let read = io_context(
-            format!("读取文件用于哈希: {}", path.display()),
+            tr_path("io.read_file_for_hash", path.display()),
             reader.read(&mut buffer),
         )?;
         if read == 0 {

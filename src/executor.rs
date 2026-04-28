@@ -9,6 +9,7 @@ use tracing::{debug, info};
 
 use crate::config::SyncConfig;
 use crate::error::{FastSyncError, Result, io_context};
+use crate::i18n::{tr_current, tr_path, tr_source_target};
 use crate::plan::{CopyReason, PlanOperation, SyncPlan};
 use crate::summary::SyncSummary;
 use crate::verify::verify_file;
@@ -45,7 +46,7 @@ pub fn execute_plan(config: &SyncConfig, plan: &SyncPlan) -> Result<SyncSummary>
     }
 
     io_context(
-        format!("创建目标根目录: {}", config.target.display()),
+        tr_path("io.create_target_root", config.target.display()),
         fs::create_dir_all(&config.target),
     )?;
 
@@ -190,7 +191,7 @@ fn worker_loop(
         if let Err(error) = result {
             let _ = sender.send(Err(error));
             if config.stop_on_error {
-                debug!(worker_id, "worker 因错误提前停止");
+                debug!(worker_id, "{}", tr_current("log.worker_stop_on_error"));
                 return;
             }
         }
@@ -259,14 +260,14 @@ fn copy_one_file(
 
     report.copied_files += 1;
     report.bytes_copied = report.bytes_copied.saturating_add(bytes);
-    info!(path = %relative_path.display(), bytes, "文件复制完成");
+    info!(path = %relative_path.display(), bytes, "{}", tr_current("log.file_copied"));
     Ok(())
 }
 
 fn create_directory(target_root: &Path, relative_path: &Path) -> Result<()> {
     let path = target_root.join(relative_path);
     io_context(
-        format!("创建目录: {}", path.display()),
+        tr_path("io.create_directory", path.display()),
         fs::create_dir_all(path),
     )
 }
@@ -274,30 +275,30 @@ fn create_directory(target_root: &Path, relative_path: &Path) -> Result<()> {
 fn delete_file(target_root: &Path, relative_path: &Path) -> Result<()> {
     let path = target_root.join(relative_path);
     io_context(
-        format!("删除文件: {}", path.display()),
+        tr_path("io.delete_file", path.display()),
         fs::remove_file(path),
     )?;
-    info!(path = %relative_path.display(), "文件删除完成");
+    info!(path = %relative_path.display(), "{}", tr_current("log.file_deleted"));
     Ok(())
 }
 
 fn delete_directory(target_root: &Path, relative_path: &Path) -> Result<()> {
     let path = target_root.join(relative_path);
     io_context(
-        format!("删除目录: {}", path.display()),
+        tr_path("io.delete_directory", path.display()),
         fs::remove_dir(path),
     )?;
-    info!(path = %relative_path.display(), "目录删除完成");
+    info!(path = %relative_path.display(), "{}", tr_current("log.directory_deleted"));
     Ok(())
 }
 
 fn delete_symlink(target_root: &Path, relative_path: &Path) -> Result<()> {
     let path = target_root.join(relative_path);
     io_context(
-        format!("删除符号链接: {}", path.display()),
+        tr_path("io.delete_symlink", path.display()),
         fs::remove_file(path),
     )?;
-    info!(path = %relative_path.display(), "符号链接删除完成");
+    info!(path = %relative_path.display(), "{}", tr_current("log.symlink_deleted"));
     Ok(())
 }
 
@@ -307,11 +308,11 @@ fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
 
     let copy_result = (|| {
         let source_file = io_context(
-            format!("打开源文件: {}", source.display()),
+            tr_path("io.open_source_file", source.display()),
             File::open(source),
         )?;
         let temp_file = io_context(
-            format!("创建临时文件: {}", temp_path.display()),
+            tr_path("io.create_temp_file", temp_path.display()),
             OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -320,19 +321,19 @@ fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
         let mut reader = BufReader::with_capacity(1024 * 1024, source_file);
         let mut writer = BufWriter::with_capacity(1024 * 1024, temp_file);
         io_context(
-            format!("复制到临时文件: {}", temp_path.display()),
+            tr_path("io.copy_to_temp_file", temp_path.display()),
             std::io::copy(&mut reader, &mut writer),
         )?;
         io_context(
-            format!("刷新临时文件: {}", temp_path.display()),
+            tr_path("io.flush_temp_file", temp_path.display()),
             writer.flush(),
         )?;
         let file = writer.into_inner().map_err(|error| FastSyncError::Io {
-            context: format!("完成临时文件写入: {}", temp_path.display()),
+            context: tr_path("io.finish_temp_file", temp_path.display()),
             source: error.into_error(),
         })?;
         io_context(
-            format!("同步临时文件数据: {}", temp_path.display()),
+            tr_path("io.sync_temp_file", temp_path.display()),
             file.sync_data(),
         )?;
         Ok(())
@@ -347,18 +348,18 @@ fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             io_context(
-                format!("替换目标文件前删除旧文件: {}", target.display()),
+                tr_path("io.remove_old_target_before_replace", target.display()),
                 fs::remove_file(target),
             )?;
             io_context(
-                format!("重命名临时文件到目标: {}", target.display()),
+                tr_path("io.rename_temp_to_target", target.display()),
                 fs::rename(&temp_path, target),
             )
         }
         Err(error) => {
             let _ = fs::remove_file(&temp_path);
             Err(FastSyncError::Io {
-                context: format!("重命名临时文件到目标: {}", target.display()),
+                context: tr_path("io.rename_temp_to_target", target.display()),
                 source: error,
             })
         }
@@ -368,7 +369,7 @@ fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
 fn copy_file_direct(source: &Path, target: &Path) -> Result<()> {
     ensure_parent(target)?;
     io_context(
-        format!("直接复制文件: {} -> {}", source.display(), target.display()),
+        tr_source_target("io.copy_file_direct", source.display(), target.display()),
         fs::copy(source, target),
     )?;
     Ok(())
@@ -377,12 +378,12 @@ fn copy_file_direct(source: &Path, target: &Path) -> Result<()> {
 fn ensure_parent(path: &Path) -> Result<&Path> {
     let Some(parent) = path.parent() else {
         return Err(FastSyncError::Io {
-            context: format!("目标路径缺少父目录: {}", path.display()),
+            context: tr_path("io.missing_parent", path.display()),
             source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent"),
         });
     };
     io_context(
-        format!("创建父目录: {}", parent.display()),
+        tr_path("io.create_parent", parent.display()),
         fs::create_dir_all(parent),
     )?;
     Ok(parent)
@@ -397,14 +398,14 @@ fn apply_file_metadata(config: &SyncConfig, relative_path: &Path) -> Result<()> 
     let source = config.source.join(relative_path);
     let target = config.target.join(relative_path);
     let source_metadata = io_context(
-        format!("读取源文件元数据: {}", source.display()),
+        tr_path("io.read_source_metadata", source.display()),
         fs::metadata(&source),
     )?;
 
     if config.preserve_permissions.enabled() {
         let permissions = source_metadata.permissions();
         io_context(
-            format!("设置目标文件权限: {}", target.display()),
+            tr_path("io.set_target_permissions", target.display()),
             fs::set_permissions(&target, permissions),
         )?;
     }
@@ -413,7 +414,7 @@ fn apply_file_metadata(config: &SyncConfig, relative_path: &Path) -> Result<()> 
         let atime = filetime::FileTime::from_last_access_time(&source_metadata);
         let mtime = filetime::FileTime::from_last_modification_time(&source_metadata);
         io_context(
-            format!("设置目标文件时间戳: {}", target.display()),
+            tr_path("io.set_target_times", target.display()),
             filetime::set_file_times(&target, atime, mtime),
         )?;
     }

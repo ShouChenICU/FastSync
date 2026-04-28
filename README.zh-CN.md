@@ -2,7 +2,7 @@
 
 # ⚡ FastSync
 
-**Rust 编写的高速单向目录同步工具。**
+**Rust 编写的高性能目录同步工具。**
 
 把源目录镜像到目标目录：速度快、可预览、覆盖已有文件时更稳妥。
 
@@ -12,7 +12,7 @@
 [![BLAKE3](https://img.shields.io/badge/Compare-BLAKE3-brightgreen.svg)](https://github.com/BLAKE3-team/BLAKE3)
 [![GitHub](https://img.shields.io/badge/GitHub-ShouChenICU%2FFastSync-black.svg)](https://github.com/ShouChenICU/FastSync)
 
-[English](README.md) · [性能优先](#-性能优先) · [安全模型](#-默认安全模型) · [安装](#-安装) · [命令速查](#-命令速查)
+[English](README.md) · [极致性能](#-极致性能) · [安全模型](#-默认安全模型) · [安装](#-安装) · [语言](#-语言) · [命令速查](#-命令速查)
 
 </div>
 
@@ -40,7 +40,7 @@ flowchart LR
     F --> G
 ```
 
-## 🏎️ 性能优先
+## 🏎️ 极致性能
 
 目录同步通常混合了文件系统延迟、元数据判断、哈希计算和真实复制。FastSync 将这些阶段保持得清晰、可控。
 
@@ -88,6 +88,13 @@ rustup default stable
 rustup component add rust-src
 ```
 
+### 使用 Cargo 从 crates.io 安装
+
+```bash
+cargo install fastsync
+fastsync --help
+```
+
 ### 从源码构建
 
 ```bash
@@ -101,6 +108,15 @@ cargo build --release
 
 ```bash
 cargo install --git https://github.com/ShouChenICU/FastSync
+```
+
+## 🌐 语言
+
+FastSync 支持英文和简体中文，会自动识别常见系统语言环境，也可以手动指定：
+
+```bash
+fastsync --lang zh-CN --help
+FASTSYNC_LANG=zh-CN fastsync --help
 ```
 
 ## 🧭 常见场景
@@ -193,6 +209,7 @@ fastsync ./target/release ./cache/release
 | `--no-atomic-write`                          | 禁用覆盖时的临时文件写入。                   |
 | `-o`, `--output <text\|json>`                | 设置摘要输出格式。                           |
 | `-l`, `--log-level <level>`                  | 设置日志级别。                               |
+| `--lang <en\|zh-CN>`                         | 设置界面语言，也支持常见 locale 别名。       |
 
 查看完整帮助：
 

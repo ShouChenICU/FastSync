@@ -2,7 +2,7 @@
 
 # ⚡ FastSync
 
-**Fast one-way folder sync, written in Rust.**
+**Fast folder sync, written in Rust.**
 
 Mirror a source folder into a target folder with speed, clear previews, and safer overwrite behavior.
 
@@ -12,7 +12,7 @@ Mirror a source folder into a target folder with speed, clear previews, and safe
 [![BLAKE3](https://img.shields.io/badge/Compare-BLAKE3-brightgreen.svg)](https://github.com/BLAKE3-team/BLAKE3)
 [![GitHub](https://img.shields.io/badge/GitHub-ShouChenICU%2FFastSync-black.svg)](https://github.com/ShouChenICU/FastSync)
 
-[简体中文](README.zh-CN.md) · [Performance](#-performance-first) · [Safety](#-safety-first-by-default) · [Install](#-install) · [CLI](#-cli-cheat-sheet)
+[简体中文](README.zh-CN.md) · [Extreme Performance](#-extreme-performance) · [Safety](#-safety-first-by-default) · [Install](#-install) · [Language](#-language) · [CLI](#-cli-cheat-sheet)
 
 </div>
 
@@ -40,11 +40,11 @@ flowchart LR
     F --> G
 ```
 
-## 🏎️ Performance First
+## 🏎️ Extreme Performance
 
 Directory sync is a mix of filesystem latency, metadata checks, hashing, and copying. FastSync keeps those stages explicit and controlled.
 
-| Performance choice        | How it helps                                                                                                                         |
+| Performance design        | How it helps                                                                                                                         |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | Rust implementation       | Native binary performance with predictable memory and CPU behavior.                                                                  |
 | Metadata-aware comparison | Uses file size and modified time where they are valid content signals, while metadata synchronization stays separately configurable. |
@@ -88,6 +88,13 @@ rustup default stable
 rustup component add rust-src
 ```
 
+### Install from crates.io
+
+```bash
+cargo install fastsync
+fastsync --help
+```
+
 ### Build from source
 
 ```bash
@@ -101,6 +108,15 @@ cargo build --release
 
 ```bash
 cargo install --git https://github.com/ShouChenICU/FastSync
+```
+
+## 🌐 Language
+
+FastSync supports English and Simplified Chinese. It detects common system locales automatically, and you can override the language when needed:
+
+```bash
+fastsync --lang zh-CN --help
+FASTSYNC_LANG=zh-CN fastsync --help
 ```
 
 ## 🧭 Common Workflows
@@ -193,6 +209,7 @@ New files that do not exist in the target are copied directly and are not counte
 | `--no-atomic-write`                          | Disable temporary-file overwrite writes.                                  |
 | `-o`, `--output <text\|json>`                | Select summary format.                                                    |
 | `-l`, `--log-level <level>`                  | Set log verbosity.                                                        |
+| `--lang <en\|zh-CN>`                         | Select interface language. Also accepts common locale aliases.            |
 
 Print the full help page:
 

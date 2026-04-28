@@ -1,0 +1,338 @@
+_version: 2
+
+cli.about:
+  en: "A fast, reliable one-way directory synchronization tool"
+  zh-CN: "快速、可靠的单向目录同步工具"
+cli.usage:
+  en: "Usage"
+  zh-CN: "用法"
+cli.arguments:
+  en: "Arguments"
+  zh-CN: "参数"
+cli.options:
+  en: "Options"
+  zh-CN: "选项"
+cli.source:
+  en: "Source directory."
+  zh-CN: "源目录。"
+cli.target:
+  en: "Target directory."
+  zh-CN: "目标目录。"
+cli.dry_run:
+  en: "Only generate the plan and summary without modifying the target directory."
+  zh-CN: "只生成计划与摘要，不实际修改目标目录。"
+cli.delete:
+  en: "Delete extra entries in the target that do not exist in the source. Disabled by default to avoid accidental deletion."
+  zh-CN: "删除目标端源目录中不存在的多余项。默认关闭，避免误删。"
+cli.follow_symlinks:
+  en: "Follow symbolic links during traversal. Disabled by default."
+  zh-CN: "遍历时跟随符号链接。默认关闭。"
+cli.compare:
+  en: "File comparison strategy."
+  zh-CN: "文件比较策略。"
+cli.strict:
+  en: "Shortcut for strict comparison: when sizes match, always use BLAKE3 to confirm content."
+  zh-CN: "strict 比较模式的快捷方式：大小一致时始终使用 BLAKE3 确认内容。"
+cli.hash:
+  en: "Content verification hash algorithm. Currently supports BLAKE3."
+  zh-CN: "内容校验哈希算法。当前支持 BLAKE3。"
+cli.verify:
+  en: "Post-copy verification level."
+  zh-CN: "复制后的校验强度。"
+cli.no_sync_metadata:
+  en: "Disable separate metadata synchronization for same-name files with identical content."
+  zh-CN: "禁用同名且内容相同文件的独立元数据同步。"
+cli.preserve_times:
+  en: "Whether to preserve modification times."
+  zh-CN: "是否保留修改时间。"
+cli.preserve_permissions:
+  en: "Whether to preserve basic permission bits."
+  zh-CN: "是否保留基础权限位。"
+cli.no_atomic_write:
+  en: "Disable temporary-file plus rename writes for target file replacement."
+  zh-CN: "禁用临时文件 + 重命名写入目标文件。"
+cli.threads:
+  en: "Worker thread count; use a number or auto."
+  zh-CN: "worker 线程数，可传数字或 auto。"
+cli.queue_size:
+  en: "Bounded task queue length; defaults to threads * 4."
+  zh-CN: "有界任务队列长度，默认 threads * 4。"
+cli.max_errors:
+  en: "Maximum allowed errors before aborting."
+  zh-CN: "最大允许错误数，达到阈值后中止。"
+cli.stop_on_error:
+  en: "Stop immediately after the first error."
+  zh-CN: "首个错误后立即停止。"
+cli.log_level:
+  en: "Log level."
+  zh-CN: "日志级别。"
+cli.output:
+  en: "Summary output format."
+  zh-CN: "摘要输出格式。"
+cli.lang:
+  en: "Interface language. Uses the system locale when supported and falls back to English. Can also be set with FASTSYNC_LANG."
+  zh-CN: "界面语言。支持时使用系统语言环境，未匹配时回退英文，也可通过 FASTSYNC_LANG 设置。"
+cli.help:
+  en: "Print help."
+  zh-CN: "输出帮助。"
+cli.version:
+  en: "Print version."
+  zh-CN: "输出版本。"
+
+value.compare.fast:
+  en: "Trust metadata when it matches; when metadata differs but sizes match, use BLAKE3 to confirm content."
+  zh-CN: "元数据一致时信任元数据；元数据不一致但大小一致时再使用 BLAKE3 确认内容。"
+value.compare.strict:
+  en: "When sizes match, always use BLAKE3 to confirm content, even if metadata also matches."
+  zh-CN: "大小一致时始终使用 BLAKE3 确认内容，即使元数据一致。"
+value.verify.none:
+  en: "Do not verify after copying."
+  zh-CN: "不做复制后校验。"
+value.verify.changed:
+  en: "Verify files that were copied or replaced."
+  zh-CN: "只校验发生复制或覆盖的文件。"
+value.verify.all:
+  en: "Verify all regular files in the source after synchronization."
+  zh-CN: "校验源目录中所有普通文件。"
+value.preserve.auto:
+  en: "Preserve according to platform capability."
+  zh-CN: "按平台能力自动保留。"
+value.preserve.true:
+  en: "Always preserve."
+  zh-CN: "强制保留。"
+value.preserve.false:
+  en: "Do not preserve."
+  zh-CN: "不保留。"
+value.hash.blake3:
+  en: "BLAKE3, the default strong verification algorithm."
+  zh-CN: "BLAKE3，默认强校验算法。"
+
+app.help_print_failed:
+  en: "failed to print help"
+  zh-CN: "输出帮助失败"
+app.json_summary_failed:
+  en: "failed to serialize JSON summary"
+  zh-CN: "序列化 JSON 摘要失败"
+
+summary.status.dry_run_done:
+  en: "Dry run complete"
+  zh-CN: "预演完成"
+summary.status.done:
+  en: "Sync complete"
+  zh-CN: "同步完成"
+summary.status.done_with_errors:
+  en: "Sync complete with errors"
+  zh-CN: "同步完成，但存在错误"
+summary.mode.dry_run:
+  en: "dry-run, plan only"
+  zh-CN: "dry-run，仅生成计划"
+summary.mode.executed:
+  en: "executed"
+  zh-CN: "已执行"
+summary.copy.planned:
+  en: "Files to copy"
+  zh-CN: "预计复制"
+summary.copy.done:
+  en: "Files copied"
+  zh-CN: "已复制"
+summary.delete.planned:
+  en: "Entries to delete"
+  zh-CN: "预计删除"
+summary.delete.done:
+  en: "Entries deleted"
+  zh-CN: "已删除"
+summary.paths:
+  en: "Paths"
+  zh-CN: "路径"
+summary.source:
+  en: "Source"
+  zh-CN: "源目录"
+summary.target:
+  en: "Target"
+  zh-CN: "目标目录"
+summary.scan_plan:
+  en: "Scan and Plan"
+  zh-CN: "扫描与计划"
+summary.run_mode:
+  en: "Mode"
+  zh-CN: "运行模式"
+summary.source_entries:
+  en: "Source entries"
+  zh-CN: "源端条目"
+summary.target_entries:
+  en: "Target entries"
+  zh-CN: "目标条目"
+summary.planned_operations:
+  en: "Operations"
+  zh-CN: "计划操作"
+summary.planned_data:
+  en: "Planned data"
+  zh-CN: "计划数据"
+summary.execution:
+  en: "Execution"
+  zh-CN: "执行结果"
+summary.files:
+  en: "files"
+  zh-CN: "个文件"
+summary.metadata:
+  en: "Metadata"
+  zh-CN: "元数据"
+summary.items:
+  en: "items"
+  zh-CN: "项"
+summary.created_dirs:
+  en: "Dirs created"
+  zh-CN: "新建目录"
+summary.dirs:
+  en: "dirs"
+  zh-CN: "个目录"
+summary.links:
+  en: "links"
+  zh-CN: "个链接"
+summary.blake3_compared:
+  en: "BLAKE3 compared"
+  zh-CN: "BLAKE3比较"
+summary.blake3_verified:
+  en: "BLAKE3 verified"
+  zh-CN: "BLAKE3校验"
+summary.status:
+  en: "Status"
+  zh-CN: "状态"
+summary.errors:
+  en: "Errors"
+  zh-CN: "错误"
+summary.duration:
+  en: "Duration"
+  zh-CN: "耗时"
+
+error.walk_dir:
+  en: "failed to traverse directory: %{value}"
+  zh-CN: "遍历目录失败: %{value}"
+error.invalid_source:
+  en: "source path does not exist or is not a directory: %{path}"
+  zh-CN: "源目录不存在或不是目录: %{path}"
+error.invalid_target:
+  en: "target path exists but is not a directory: %{path}"
+  zh-CN: "目标路径已存在但不是目录: %{path}"
+error.path_type_conflict:
+  en: "path type conflict: %{path}; source type is %{source}, target type is %{target}"
+  zh-CN: "路径类型冲突: %{path}，源类型为 %{source}，目标类型为 %{target}"
+error.path_outside_root:
+  en: "path is outside the scan root: %{path}"
+  zh-CN: "路径不在扫描根目录内: %{path}"
+error.many:
+  en: "%{count} errors occurred during execution; first error: %{first}"
+  zh-CN: "执行过程中发生 %{count} 个错误，首个错误: %{first}"
+error.verification_failed:
+  en: "post-copy verification failed: %{path}"
+  zh-CN: "复制后校验失败: %{path}"
+error.unsupported_entry:
+  en: "unsupported sync object type: %{path}"
+  zh-CN: "不支持的同步对象类型: %{path}"
+error.entry_kind.file:
+  en: "file"
+  zh-CN: "文件"
+error.entry_kind.directory:
+  en: "directory"
+  zh-CN: "目录"
+error.entry_kind.symlink:
+  en: "symlink"
+  zh-CN: "符号链接"
+
+io.parse_threads:
+  en: "failed to parse --threads: %{value}"
+  zh-CN: "解析 --threads 失败: %{value}"
+io.create_target_root:
+  en: "create target root directory: %{path}"
+  zh-CN: "创建目标根目录: %{path}"
+io.create_directory:
+  en: "create directory: %{path}"
+  zh-CN: "创建目录: %{path}"
+io.delete_file:
+  en: "delete file: %{path}"
+  zh-CN: "删除文件: %{path}"
+io.delete_directory:
+  en: "delete directory: %{path}"
+  zh-CN: "删除目录: %{path}"
+io.delete_symlink:
+  en: "delete symlink: %{path}"
+  zh-CN: "删除符号链接: %{path}"
+io.open_source_file:
+  en: "open source file: %{path}"
+  zh-CN: "打开源文件: %{path}"
+io.create_temp_file:
+  en: "create temporary file: %{path}"
+  zh-CN: "创建临时文件: %{path}"
+io.copy_to_temp_file:
+  en: "copy to temporary file: %{path}"
+  zh-CN: "复制到临时文件: %{path}"
+io.flush_temp_file:
+  en: "flush temporary file: %{path}"
+  zh-CN: "刷新临时文件: %{path}"
+io.finish_temp_file:
+  en: "finish writing temporary file: %{path}"
+  zh-CN: "完成临时文件写入: %{path}"
+io.sync_temp_file:
+  en: "sync temporary file data: %{path}"
+  zh-CN: "同步临时文件数据: %{path}"
+io.remove_old_target_before_replace:
+  en: "remove old target file before replacement: %{path}"
+  zh-CN: "替换目标文件前删除旧文件: %{path}"
+io.rename_temp_to_target:
+  en: "rename temporary file to target: %{path}"
+  zh-CN: "重命名临时文件到目标: %{path}"
+io.copy_file_direct:
+  en: "copy file directly: %{source} -> %{target}"
+  zh-CN: "直接复制文件: %{source} -> %{target}"
+io.missing_parent:
+  en: "target path has no parent directory: %{path}"
+  zh-CN: "目标路径缺少父目录: %{path}"
+io.create_parent:
+  en: "create parent directory: %{path}"
+  zh-CN: "创建父目录: %{path}"
+io.read_source_metadata:
+  en: "read source file metadata: %{path}"
+  zh-CN: "读取源文件元数据: %{path}"
+io.set_target_permissions:
+  en: "set target file permissions: %{path}"
+  zh-CN: "设置目标文件权限: %{path}"
+io.set_target_times:
+  en: "set target file timestamps: %{path}"
+  zh-CN: "设置目标文件时间戳: %{path}"
+io.read_metadata:
+  en: "read metadata: %{path}"
+  zh-CN: "读取元数据失败: %{path}"
+io.read_symlink_metadata:
+  en: "read symlink metadata: %{path}"
+  zh-CN: "读取符号链接元数据失败: %{path}"
+io.open_file_for_hash:
+  en: "open file for hashing: %{path}"
+  zh-CN: "打开文件用于哈希: %{path}"
+io.read_file_for_hash:
+  en: "read file for hashing: %{path}"
+  zh-CN: "读取文件用于哈希: %{path}"
+
+log.scan_started:
+  en: "starting directory scan"
+  zh-CN: "开始扫描目录"
+log.scan_finished:
+  en: "directory scan complete"
+  zh-CN: "目录扫描完成"
+log.plan_built:
+  en: "sync plan generated"
+  zh-CN: "同步计划已生成"
+log.worker_stop_on_error:
+  en: "worker stopped early because of an error"
+  zh-CN: "worker 因错误提前停止"
+log.file_copied:
+  en: "file copy complete"
+  zh-CN: "文件复制完成"
+log.file_deleted:
+  en: "file deletion complete"
+  zh-CN: "文件删除完成"
+log.directory_deleted:
+  en: "directory deletion complete"
+  zh-CN: "目录删除完成"
+log.symlink_deleted:
+  en: "symlink deletion complete"
+  zh-CN: "符号链接删除完成"

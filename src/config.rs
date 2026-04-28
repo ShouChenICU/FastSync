@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
-use clap::ValueEnum;
+use clap::{ValueEnum, builder::PossibleValue};
 
 use crate::cli::Cli;
 use crate::error::{FastSyncError, Result};
+use crate::i18n::{tr_current, tr_value};
 
 /// 文件内容比较策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareMode {
     /// 元数据一致时信任元数据；元数据不一致但大小一致时再使用 BLAKE3 确认内容。
     Fast,
@@ -15,7 +16,7 @@ pub enum CompareMode {
 }
 
 /// 复制后验证强度。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyMode {
     /// 不做复制后校验。
     None,
@@ -44,7 +45,7 @@ impl VerifyMode {
 }
 
 /// 元数据保留策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreserveMode {
     /// 按平台能力自动保留。
     Auto,
@@ -65,14 +66,14 @@ impl PreserveMode {
 }
 
 /// 当前实现支持的哈希算法。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgorithm {
     /// BLAKE3，默认强校验算法。
     Blake3,
 }
 
 /// 日志级别。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
     Error,
     Warn,
@@ -94,7 +95,7 @@ impl LogLevel {
 }
 
 /// 终端/机器输出模式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
     Text,
     Json,
@@ -143,7 +144,7 @@ impl TryFrom<Cli> for SyncConfig {
             #[allow(non_snake_case)]
             None | Some("auto") => default_threads(),
             Some(raw) => raw.parse::<usize>().map_err(|err| FastSyncError::Io {
-                context: format!("解析 --threads 失败: {raw}"),
+                context: tr_value("io.parse_threads", raw),
                 source: std::io::Error::new(std::io::ErrorKind::InvalidInput, err),
             })?,
         }
@@ -184,4 +185,109 @@ fn default_threads() -> usize {
         .map(|value| value.get())
         .unwrap_or(4)
         .clamp(1, 8)
+}
+
+const COMPARE_MODE_VARIANTS: [CompareMode; 2] = [CompareMode::Fast, CompareMode::Strict];
+const VERIFY_MODE_VARIANTS: [VerifyMode; 3] =
+    [VerifyMode::None, VerifyMode::Changed, VerifyMode::All];
+const PRESERVE_MODE_VARIANTS: [PreserveMode; 3] =
+    [PreserveMode::Auto, PreserveMode::True, PreserveMode::False];
+const HASH_ALGORITHM_VARIANTS: [HashAlgorithm; 1] = [HashAlgorithm::Blake3];
+const LOG_LEVEL_VARIANTS: [LogLevel; 5] = [
+    LogLevel::Error,
+    LogLevel::Warn,
+    LogLevel::Info,
+    LogLevel::Debug,
+    LogLevel::Trace,
+];
+const OUTPUT_MODE_VARIANTS: [OutputMode; 2] = [OutputMode::Text, OutputMode::Json];
+
+impl ValueEnum for CompareMode {
+    fn value_variants<'a>() -> &'a [Self] {
+        &COMPARE_MODE_VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        match self {
+            Self::Fast => Some(PossibleValue::new("fast").help(tr_current("value.compare.fast"))),
+            Self::Strict => {
+                Some(PossibleValue::new("strict").help(tr_current("value.compare.strict")))
+            }
+        }
+    }
+}
+
+impl ValueEnum for VerifyMode {
+    fn value_variants<'a>() -> &'a [Self] {
+        &VERIFY_MODE_VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        match self {
+            Self::None => Some(PossibleValue::new("none").help(tr_current("value.verify.none"))),
+            Self::Changed => {
+                Some(PossibleValue::new("changed").help(tr_current("value.verify.changed")))
+            }
+            Self::All => Some(PossibleValue::new("all").help(tr_current("value.verify.all"))),
+        }
+    }
+}
+
+impl ValueEnum for PreserveMode {
+    fn value_variants<'a>() -> &'a [Self] {
+        &PRESERVE_MODE_VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        match self {
+            Self::Auto => Some(PossibleValue::new("auto").help(tr_current("value.preserve.auto"))),
+            Self::True => Some(PossibleValue::new("true").help(tr_current("value.preserve.true"))),
+            Self::False => {
+                Some(PossibleValue::new("false").help(tr_current("value.preserve.false")))
+            }
+        }
+    }
+}
+
+impl ValueEnum for HashAlgorithm {
+    fn value_variants<'a>() -> &'a [Self] {
+        &HASH_ALGORITHM_VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        match self {
+            Self::Blake3 => {
+                Some(PossibleValue::new("blake3").help(tr_current("value.hash.blake3")))
+            }
+        }
+    }
+}
+
+impl ValueEnum for LogLevel {
+    fn value_variants<'a>() -> &'a [Self] {
+        &LOG_LEVEL_VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        match self {
+            Self::Error => Some(PossibleValue::new("error")),
+            Self::Warn => Some(PossibleValue::new("warn")),
+            Self::Info => Some(PossibleValue::new("info")),
+            Self::Debug => Some(PossibleValue::new("debug")),
+            Self::Trace => Some(PossibleValue::new("trace")),
+        }
+    }
+}
+
+impl ValueEnum for OutputMode {
+    fn value_variants<'a>() -> &'a [Self] {
+        &OUTPUT_MODE_VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        match self {
+            Self::Text => Some(PossibleValue::new("text")),
+            Self::Json => Some(PossibleValue::new("json")),
+        }
+    }
 }

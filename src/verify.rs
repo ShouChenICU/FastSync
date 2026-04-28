@@ -31,3 +31,62 @@ pub fn verify_all_source_files(source_snapshot: &Snapshot, target_root: &Path) -
 
     Ok(verified)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use crate::error::FastSyncError;
+    use crate::scan::scan_directory;
+
+    use super::*;
+
+    #[test]
+    fn verify_file_accepts_matching_content() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let root = tempdir()?;
+        let source = root.path().join("source.txt");
+        let target = root.path().join("target.txt");
+        fs::write(&source, "same")?;
+        fs::write(&target, "same")?;
+
+        verify_file(&source, &target, Path::new("source.txt"))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn verify_file_rejects_mismatched_content()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        let source = root.path().join("source.txt");
+        let target = root.path().join("target.txt");
+        fs::write(&source, "source")?;
+        fs::write(&target, "target")?;
+
+        let error = verify_file(&source, &target, Path::new("source.txt"))
+            .expect_err("mismatched content should fail");
+
+        assert!(matches!(error, FastSyncError::VerificationFailed(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_all_source_files_ignores_directories()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        fs::create_dir(source.path().join("nested"))?;
+        fs::create_dir(target.path().join("nested"))?;
+        fs::write(source.path().join("nested").join("a.txt"), "same")?;
+        fs::write(target.path().join("nested").join("a.txt"), "same")?;
+        let snapshot = scan_directory(source.path(), false)?;
+
+        let verified = verify_all_source_files(&snapshot, target.path())?;
+
+        assert_eq!(verified, 1);
+        Ok(())
+    }
+}

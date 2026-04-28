@@ -1,6 +1,6 @@
 [package]
 name = "fastsync"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["ShouChen"]
@@ -12,6 +12,16 @@ documentation = "https://docs.rs/fastsync"
 readme = "README.md"
 keywords = ["sync", "directory", "backup", "blake3", "cli"]
 categories = ["command-line-utilities"]
+exclude = [
+    "AGENTS.md",
+    "docs/**",
+    ".agents",
+    ".agents/**",
+    ".codex",
+    ".codex/**",
+    ".github/copilot-instructions.md",
+    ".vscode/**",
+]
 
 [dependencies]
 blake3 = "1.5"
@@ -21,7 +31,12 @@ filetime = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.10"
-thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 walkdir = "2.5"
+rust-i18n = "4.0"
+
+[package.metadata.i18n]
+available-locales = ["en", "zh-CN"]
+default-locale = "en"
+load-path = "locales"

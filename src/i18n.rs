@@ -1,0 +1,189 @@
+use std::fmt::Display;
+
+use rust_i18n::t;
+
+/// fastsync 支持的用户界面语言。
+///
+/// 该枚举只影响 CLI 帮助、文本摘要和用户可见错误，不改变 JSON 字段与同步语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    En,
+    ZhCn,
+}
+
+impl Language {
+    pub const DEFAULT: Self = Self::En;
+
+    /// 返回 rust-i18n 使用的 locale 标识。
+    pub fn as_locale(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::ZhCn => "zh-CN",
+        }
+    }
+
+    /// 解析 CLI 或环境变量中的语言标识。
+    pub fn parse(raw: &str) -> Option<Self> {
+        for candidate in raw.split(':') {
+            if let Some(language) = Self::parse_one(candidate) {
+                return Some(language);
+            }
+        }
+
+        None
+    }
+
+    /// 从 `FASTSYNC_LANG` 或系统 locale 环境变量读取语言，非法值会被忽略。
+    pub fn from_env() -> Option<Self> {
+        language_from_env_var("FASTSYNC_LANG").or_else(Self::from_system_env)
+    }
+
+    /// 从系统 locale 环境变量读取语言，用于适配 Linux/macOS 终端环境。
+    pub fn from_system_env() -> Option<Self> {
+        ["LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"]
+            .into_iter()
+            .find_map(language_from_env_var)
+    }
+
+    fn parse_one(raw: &str) -> Option<Self> {
+        let normalized = normalize_locale(raw)?;
+
+        if matches!(normalized.as_str(), "c" | "posix") || normalized.starts_with("en") {
+            return Some(Self::En);
+        }
+
+        if normalized == "cn"
+            || normalized == "chinese"
+            || normalized == "中文"
+            || normalized.starts_with("zh")
+        {
+            return Some(Self::ZhCn);
+        }
+
+        None
+    }
+}
+
+fn language_from_env_var(name: &str) -> Option<Language> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| Language::parse(&value))
+}
+
+fn normalize_locale(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let without_encoding = value.split('.').next().unwrap_or(value);
+    let without_modifier = without_encoding
+        .split('@')
+        .next()
+        .unwrap_or(without_encoding);
+    let normalized = without_modifier
+        .trim()
+        .replace('_', "-")
+        .to_ascii_lowercase();
+
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+/// 设置当前线程后续翻译使用的语言。
+pub fn set_language(language: Language) {
+    rust_i18n::set_locale(language.as_locale());
+}
+
+/// 返回当前全局语言；未知 locale 会回退到英文。
+pub fn current_language() -> Language {
+    Language::parse(&rust_i18n::locale()).unwrap_or(Language::DEFAULT)
+}
+
+/// 获取指定语言的简单翻译文本。
+pub fn tr(language: Language, key: &str) -> String {
+    t!(key, locale = language.as_locale()).to_string()
+}
+
+/// 获取当前语言的简单翻译文本。
+pub fn tr_current(key: &str) -> String {
+    tr(current_language(), key)
+}
+
+/// 获取带单个 `path` 变量的当前语言翻译文本。
+pub fn tr_path(key: &str, path: impl Display) -> String {
+    t!(
+        key,
+        locale = current_language().as_locale(),
+        path = path.to_string()
+    )
+    .to_string()
+}
+
+/// 获取带 `source` 和 `target` 变量的当前语言翻译文本。
+pub fn tr_source_target(key: &str, source: impl Display, target: impl Display) -> String {
+    t!(
+        key,
+        locale = current_language().as_locale(),
+        source = source.to_string(),
+        target = target.to_string()
+    )
+    .to_string()
+}
+
+/// 获取带 `path`、`source` 和 `target` 变量的当前语言翻译文本。
+pub fn tr_path_source_target(
+    key: &str,
+    path: impl Display,
+    source: impl Display,
+    target: impl Display,
+) -> String {
+    t!(
+        key,
+        locale = current_language().as_locale(),
+        path = path.to_string(),
+        source = source.to_string(),
+        target = target.to_string()
+    )
+    .to_string()
+}
+
+/// 获取带 `value` 变量的当前语言翻译文本。
+pub fn tr_value(key: &str, value: impl Display) -> String {
+    t!(
+        key,
+        locale = current_language().as_locale(),
+        value = value.to_string()
+    )
+    .to_string()
+}
+
+/// 获取带错误数量和首个错误的当前语言翻译文本。
+pub fn tr_many_errors(count: usize, first: &str) -> String {
+    t!(
+        "error.many",
+        locale = current_language().as_locale(),
+        count = count,
+        first = first
+    )
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_common_linux_locale_names() {
+        assert_eq!(Language::parse("zh_CN.UTF-8"), Some(Language::ZhCn));
+        assert_eq!(Language::parse("zh-CN.UTF-8"), Some(Language::ZhCn));
+        assert_eq!(Language::parse("zh_Hans_CN.UTF-8"), Some(Language::ZhCn));
+        assert_eq!(Language::parse("en_US.UTF-8"), Some(Language::En));
+        assert_eq!(Language::parse("C.UTF-8"), Some(Language::En));
+    }
+
+    #[test]
+    fn parses_language_priority_list() {
+        assert_eq!(Language::parse("fr_FR:zh_CN:en_US"), Some(Language::ZhCn));
+        assert_eq!(Language::parse("fr_FR:en_US"), Some(Language::En));
+    }
+}

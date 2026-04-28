@@ -2,12 +2,15 @@
 //!
 //! 这里负责串联“扫描 -> 比较 -> 执行 -> 校验/汇总”的主流程。
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 pub mod cli;
 pub mod compare;
 pub mod config;
 pub mod error;
 pub mod executor;
 pub mod hash;
+pub mod i18n;
 pub mod plan;
 pub mod scan;
 pub mod summary;
@@ -34,7 +37,8 @@ pub fn run_sync(config: SyncConfig) -> Result<SyncSummary> {
     info!(
         source = %config.source.display(),
         target = %config.target.display(),
-        "开始扫描目录"
+        "{}",
+        crate::i18n::tr_current("log.scan_started")
     );
 
     let source_snapshot = scan_directory(&config.source, config.follow_symlinks)?;
@@ -43,14 +47,16 @@ pub fn run_sync(config: SyncConfig) -> Result<SyncSummary> {
     info!(
         source_entries = source_snapshot.entries.len(),
         target_entries = target_snapshot.entries.len(),
-        "目录扫描完成"
+        "{}",
+        crate::i18n::tr_current("log.scan_finished")
     );
 
     let plan = build_plan(&config, &source_snapshot, &target_snapshot)?;
     info!(
         operations = plan.operations.len(),
         bytes = plan.bytes_to_copy,
-        "同步计划已生成"
+        "{}",
+        crate::i18n::tr_current("log.plan_built")
     );
 
     let mut summary = execute_plan(&config, &plan)?;
@@ -275,6 +281,127 @@ mod tests {
 
         assert!(!target.path().join("stale.txt").exists());
         assert_eq!(summary.deleted_files, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn sync_creates_missing_target_root_and_nested_directories()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target_parent = tempdir()?;
+        let target = target_parent.path().join("missing-target");
+        fs::create_dir(source.path().join("nested"))?;
+        fs::write(source.path().join("nested").join("a.txt"), "hello")?;
+
+        let cli = Cli::for_test(source.path(), &target);
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(
+            fs::read_to_string(target.join("nested").join("a.txt"))?,
+            "hello"
+        );
+        assert_eq!(summary.created_dirs, 1);
+        assert_eq!(summary.copied_files, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_flag_removes_obsolete_nested_directory_tree()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        let stale_dir = target.path().join("stale");
+        fs::create_dir(&stale_dir)?;
+        fs::write(stale_dir.join("old.txt"), "old")?;
+
+        let mut cli = Cli::for_test(source.path(), target.path());
+        cli.delete = true;
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert!(!stale_dir.exists());
+        assert_eq!(summary.deleted_files, 1);
+        assert_eq!(summary.deleted_dirs, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_disabled_preserves_obsolete_target_file()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        let stale_file = target.path().join("stale.txt");
+        fs::write(&stale_file, "stale")?;
+
+        let cli = Cli::for_test(source.path(), target.path());
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(fs::read_to_string(stale_file)?, "stale");
+        assert_eq!(summary.deleted_files, 0);
+        assert_eq!(summary.planned_operations, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_all_counts_all_source_files_after_sync()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        fs::write(source.path().join("a.txt"), "alpha")?;
+        fs::write(source.path().join("b.txt"), "beta")?;
+
+        let mut cli = Cli::for_test(source.path(), target.path());
+        cli.verify = crate::config::VerifyMode::All;
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(summary.copied_files, 2);
+        assert_eq!(summary.verified_files, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn path_type_conflict_errors_when_source_file_matches_target_directory()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        fs::write(source.path().join("item"), "file")?;
+        fs::create_dir(target.path().join("item"))?;
+
+        let cli = Cli::for_test(source.path(), target.path());
+        let config = SyncConfig::try_from(cli)?;
+
+        let error = crate::run_sync(config).expect_err("type conflict should fail");
+
+        assert!(error.to_string().contains("item"));
+        Ok(())
+    }
+
+    #[test]
+    fn no_atomic_write_overwrites_changed_file()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        fs::write(source.path().join("a.txt"), "new-content")?;
+        fs::write(target.path().join("a.txt"), "old")?;
+
+        let mut cli = Cli::for_test(source.path(), target.path());
+        cli.atomic_write = false;
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(
+            fs::read_to_string(target.path().join("a.txt"))?,
+            "new-content"
+        );
+        assert_eq!(summary.copied_files, 1);
         Ok(())
     }
 }

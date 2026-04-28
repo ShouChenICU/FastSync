@@ -6,6 +6,7 @@ use std::time::SystemTime;
 use walkdir::WalkDir;
 
 use crate::error::{FastSyncError, Result, io_context};
+use crate::i18n::tr_path;
 
 /// 扫描到的文件系统对象类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,12 +105,12 @@ fn scan_existing_directory(root: &Path, follow_symlinks: bool) -> Result<Snapsho
             .to_path_buf();
         let metadata = if follow_symlinks {
             io_context(
-                format!("读取元数据失败: {}", absolute_path.display()),
+                tr_path("io.read_metadata", absolute_path.display()),
                 fs::metadata(&absolute_path),
             )?
         } else {
             io_context(
-                format!("读取符号链接元数据失败: {}", absolute_path.display()),
+                tr_path("io.read_symlink_metadata", absolute_path.display()),
                 fs::symlink_metadata(&absolute_path),
             )?
         };
@@ -148,4 +149,77 @@ fn scan_existing_directory(root: &Path, follow_symlinks: bool) -> Result<Snapsho
     }
 
     Ok(snapshot)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn optional_missing_directory_returns_empty_snapshot()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        let missing = root.path().join("missing");
+
+        let snapshot = scan_optional_directory(&missing, false)?;
+
+        assert!(snapshot.entries.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn scan_directory_records_nested_relative_paths()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        fs::create_dir(root.path().join("nested"))?;
+        fs::write(root.path().join("nested").join("a.txt"), "hello")?;
+
+        let snapshot = scan_directory(root.path(), false)?;
+
+        assert!(
+            snapshot
+                .get(Path::new("nested"))
+                .is_some_and(FileEntry::is_dir)
+        );
+        assert!(
+            snapshot
+                .get(Path::new("nested/a.txt"))
+                .is_some_and(FileEntry::is_file)
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_preserves_symlink_kind_when_not_following()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        fs::write(root.path().join("target.txt"), "hello")?;
+        std::os::unix::fs::symlink("target.txt", root.path().join("link.txt"))?;
+
+        let snapshot = scan_directory(root.path(), false)?;
+
+        let link = snapshot.get(Path::new("link.txt")).expect("link entry");
+        assert_eq!(link.kind, EntryKind::Symlink);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_follows_symlink_when_enabled() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        fs::write(root.path().join("target.txt"), "hello")?;
+        std::os::unix::fs::symlink("target.txt", root.path().join("link.txt"))?;
+
+        let snapshot = scan_directory(root.path(), true)?;
+
+        let link = snapshot.get(Path::new("link.txt")).expect("link entry");
+        assert_eq!(link.kind, EntryKind::File);
+        Ok(())
+    }
 }
