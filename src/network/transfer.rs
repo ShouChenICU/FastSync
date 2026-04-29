@@ -11,7 +11,7 @@ use crate::error::{FastSyncError, Result};
 use crate::i18n::tr_current;
 
 use super::{
-    BUFFER_SIZE,
+    BUFFER_SIZE, HASH_REQUEST_BATCH_SIZE,
     protocol::{
         DirManifest, FileManifest, FileTransfer, Manifest, TransferOptions, WireMessage,
         WireMetadata,
@@ -46,31 +46,18 @@ pub(super) async fn send_tree(
         "{}",
         tr_current("log.phase_finished")
     );
-    let mut requested = read_requested_paths(recv).await?;
-
-    let mut transfers = Vec::new();
-    for file in &manifest.files {
-        if !requested.remove(&file.path) {
-            continue;
-        }
-        info!(
-            path = %file.path.display(),
-            bytes = file.len,
-            "sending file"
-        );
-        let transfer = file_transfer(root, file, hashes.get(&file.path).cloned())?;
-        transfers.push(transfer);
-    }
-    if !requested.is_empty() {
-        return Err(other_message(
-            "send requested network files",
-            "peer requested paths outside the manifest",
-        ));
-    }
+    let requested = read_requested_paths(recv).await?;
 
     let phase_started = Instant::now();
-    let (sent_files, total_bytes) =
-        send_files(root, connection, transfers, options.file_concurrency).await?;
+    let (sent_files, total_bytes) = send_requested_file_streams(
+        root,
+        connection,
+        &manifest,
+        requested,
+        &hashes,
+        options.file_concurrency,
+    )
+    .await?;
     info!(
         phase = "network_send_files",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -223,6 +210,7 @@ pub(super) async fn receive_tree(
     );
     let phase_started = Instant::now();
     let requested_files = send_file_requests(root, &manifest, options.strict, send, recv).await?;
+    let requested_paths: HashSet<_> = requested_files.iter().cloned().collect();
     info!(
         requested_files = requested_files.len(),
         skipped_files = manifest.files.len().saturating_sub(requested_files.len()),
@@ -263,7 +251,13 @@ pub(super) async fn receive_tree(
         0
     };
     let phase_started = Instant::now();
-    apply_file_metadata(root, &manifest.files, options)?;
+    let skipped_files: Vec<_> = manifest
+        .files
+        .iter()
+        .filter(|file| !requested_paths.contains(&file.path))
+        .cloned()
+        .collect();
+    apply_file_metadata(root, &skipped_files, options)?;
     apply_directory_metadata(root, &manifest.dirs, options)?;
     info!(
         phase = "network_apply_metadata",
@@ -339,55 +333,95 @@ pub(super) async fn send_file_requests(
     };
 
     let mut requested = Vec::new();
+    let mut direct_requests = 0_usize;
+    let mut hash_comparisons = Vec::new();
     for file in &manifest.files {
         match file_request_decision(&target_snapshot, file, strict)? {
-            FileRequestDecision::Request => requested.push(file.path.clone()),
+            FileRequestDecision::Request => {
+                requested.push(file.path.clone());
+                direct_requests += 1;
+            }
             FileRequestDecision::Skip => {}
             FileRequestDecision::CompareHash { local_path } => {
                 let local_digest = hex_digest(crate::hash::blake3_file(&local_path)?);
-                let remote_digest = request_remote_hash(send, recv, &file.path).await?;
-                if local_digest != remote_digest {
-                    requested.push(file.path.clone());
+                hash_comparisons.push((file.path.clone(), local_digest));
+            }
+        }
+    }
+
+    let hash_started = Instant::now();
+    let remote_hashes = request_remote_hashes(send, recv, &hash_comparisons).await?;
+    let mut hash_changed = 0_usize;
+    for (path, local_digest) in hash_comparisons {
+        if remote_hashes.get(&path) != Some(&local_digest) {
+            requested.push(path);
+            hash_changed += 1;
+        }
+    }
+    info!(
+        hash_requests = remote_hashes.len(),
+        changed_after_hash = hash_changed,
+        elapsed_ms = hash_started.elapsed().as_millis(),
+        "completed network hash comparison"
+    );
+
+    send_requested_file_paths(requested.iter().cloned(), send).await?;
+    info!(
+        direct_requests,
+        hash_changed,
+        requested_files = requested.len(),
+        "completed network file request planning"
+    );
+    Ok(requested)
+}
+
+pub(super) async fn request_remote_hashes(
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    comparisons: &[(PathBuf, String)],
+) -> Result<HashMap<PathBuf, String>> {
+    let mut hashes = HashMap::new();
+
+    for batch in comparisons.chunks(HASH_REQUEST_BATCH_SIZE) {
+        let mut pending = HashSet::new();
+        for (path, _) in batch {
+            if !pending.insert(path.clone()) {
+                return Err(other_message(
+                    "request network hashes",
+                    format!("duplicate hash request path: {}", path.display()),
+                ));
+            }
+            write_message(send, &WireMessage::HashRequest { path: path.clone() }).await?;
+        }
+
+        for _ in 0..batch.len() {
+            match read_message(recv).await? {
+                WireMessage::Hash { path, blake3 } => {
+                    if !pending.contains(&path) {
+                        return Err(other_message(
+                            "read network hash response",
+                            format!("unexpected hash response path: {}", path.display()),
+                        ));
+                    }
+                    if hashes.insert(path.clone(), blake3).is_some() {
+                        return Err(other_message(
+                            "read network hash response",
+                            format!("duplicate hash response path: {}", path.display()),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(other_message(
+                        "read network hash response",
+                        "unexpected message",
+                    ));
                 }
             }
         }
     }
+
     write_message(send, &WireMessage::HashRequestEnd).await?;
-    send_requested_file_paths(requested.iter().cloned(), send).await?;
-    Ok(requested)
-}
-
-pub(super) async fn request_remote_hash(
-    send: &mut SendStream,
-    recv: &mut RecvStream,
-    path: &Path,
-) -> Result<String> {
-    write_message(
-        send,
-        &WireMessage::HashRequest {
-            path: path.to_path_buf(),
-        },
-    )
-    .await?;
-
-    match read_message(recv).await? {
-        WireMessage::Hash {
-            path: reply,
-            blake3,
-        } if reply == path => Ok(blake3),
-        WireMessage::Hash { path: reply, .. } => Err(other_message(
-            "read network hash response",
-            format!(
-                "hash response path mismatch: expected {}, got {}",
-                path.display(),
-                reply.display()
-            ),
-        )),
-        _ => Err(other_message(
-            "read network hash response",
-            "unexpected message",
-        )),
-    }
+    Ok(hashes)
 }
 
 pub(super) async fn send_requested_file_paths(
@@ -573,17 +607,41 @@ pub(super) fn hash_manifest_path(root: &Path, path: &Path) -> Result<String> {
     crate::hash::blake3_file(&path).map(hex_digest)
 }
 
-pub(super) async fn send_files(
+pub(super) async fn send_requested_file_streams(
     root: &Path,
     connection: &quinn::Connection,
-    transfers: Vec<FileTransfer>,
+    manifest: &Manifest,
+    requested: HashSet<PathBuf>,
+    hashes: &HashMap<PathBuf, String>,
     file_concurrency: usize,
 ) -> Result<(usize, u64)> {
+    let manifest_paths: HashSet<_> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    if !requested.is_subset(&manifest_paths) {
+        return Err(other_message(
+            "send requested network files",
+            "peer requested paths outside the manifest",
+        ));
+    }
+
     let mut tasks = JoinSet::new();
     let mut files = 0_usize;
     let mut bytes = 0_u64;
 
-    for transfer in transfers {
+    for file in &manifest.files {
+        if !requested.contains(&file.path) {
+            continue;
+        }
+
+        info!(
+            path = %file.path.display(),
+            bytes = file.len,
+            "sending file"
+        );
+        let transfer = file_transfer(root, file, hashes.get(&file.path).cloned())?;
         while tasks.len() >= file_concurrency {
             let (sent_files, sent_bytes) = join_file_task(&mut tasks).await?;
             files += sent_files;

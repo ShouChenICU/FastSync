@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use quinn::Endpoint;
 
@@ -9,6 +10,7 @@ use super::{
     MAX_MESSAGE_SIZE, NetworkCommand, PROTOCOL_VERSION, ShareMode, SyncDirection,
     cli::validate_pairing_code,
     protocol::{FileManifest, FileTransfer, Manifest, TransferOptions, WireMessage, WireMetadata},
+    protocol_io::{read_message, write_message},
     session::install_crypto_provider,
     summary::{NetworkSide, NetworkSummary, ReceiveSummary},
     transfer::*,
@@ -402,6 +404,93 @@ fn strict_request_files_hashes_even_when_metadata_matches()
 
     assert!(fast_requested.is_empty());
     assert_eq!(strict_requested, vec![PathBuf::from("same-meta.txt")]);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "opens local UDP sockets"]
+async fn network_hash_requests_are_batched_before_responses()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let target = tempfile::tempdir()?;
+    std::fs::write(source.path().join("alpha.txt"), "aaaa")?;
+    std::fs::write(source.path().join("beta.txt"), "bbbb")?;
+    std::fs::write(target.path().join("alpha.txt"), "aaaa")?;
+    std::fs::write(target.path().join("beta.txt"), "cccc")?;
+    for name in ["alpha.txt", "beta.txt"] {
+        filetime::set_file_mtime(
+            target.path().join(name),
+            filetime::FileTime::from_unix_time(1, 0),
+        )?;
+    }
+
+    let manifest = build_manifest(source.path())?;
+    let remote_hashes = manifest_hashes(source.path(), &manifest)?;
+    let ConnectedPair {
+        _server_endpoint,
+        _client_endpoint,
+        server,
+        client,
+    } = connected_pair().await?;
+
+    let server_task = tokio::spawn(async move {
+        let (mut server_send, mut server_recv) = server
+            .accept_bi()
+            .await
+            .map_err(|error| other("test accept control stream", error))?;
+        let mut requested_hash_paths = Vec::new();
+        for _ in 0..2 {
+            let message =
+                tokio::time::timeout(Duration::from_secs(1), read_message(&mut server_recv))
+                    .await
+                    .map_err(|error| other("test wait for batched hash request", error))??;
+            match message {
+                WireMessage::HashRequest { path } => requested_hash_paths.push(path),
+                _ => return Err(other_message("test hash pipeline", "expected hash request")),
+            }
+        }
+
+        for path in &requested_hash_paths {
+            write_message(
+                &mut server_send,
+                &WireMessage::Hash {
+                    path: path.clone(),
+                    blake3: remote_hashes
+                        .get(path)
+                        .expect("hash request path should exist")
+                        .clone(),
+                },
+            )
+            .await?;
+        }
+
+        match read_message(&mut server_recv).await? {
+            WireMessage::HashRequestEnd => {}
+            _ => {
+                return Err(other_message(
+                    "test hash pipeline",
+                    "expected hash request end",
+                ));
+            }
+        }
+
+        read_requested_paths(&mut server_recv).await
+    });
+
+    let (mut client_send, mut client_recv) = client.open_bi().await?;
+    let requested = send_file_requests(
+        target.path(),
+        &manifest,
+        false,
+        &mut client_send,
+        &mut client_recv,
+    )
+    .await?;
+    let server_requested = server_task.await??;
+
+    assert_eq!(requested, vec![PathBuf::from("beta.txt")]);
+    assert!(server_requested.contains(&PathBuf::from("beta.txt")));
+    assert_eq!(server_requested.len(), 1);
     Ok(())
 }
 

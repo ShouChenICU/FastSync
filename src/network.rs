@@ -19,6 +19,7 @@ const PROTOCOL_VERSION: u16 = 7;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const BUFFER_SIZE: usize = 1024 * 1024;
 const MAX_NETWORK_FILE_CONCURRENCY: usize = 64;
+const HASH_REQUEST_BATCH_SIZE: usize = 128;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
