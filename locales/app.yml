@@ -452,6 +452,9 @@ log.scan_finished:
 log.plan_built:
   en: "sync plan generated"
   zh-CN: "同步计划已生成"
+log.phase_finished:
+  en: "sync phase complete"
+  zh-CN: "同步阶段完成"
 log.worker_stop_on_error:
   en: "worker stopped early because of an error"
   zh-CN: "worker 因错误提前停止"

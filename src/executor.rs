@@ -59,42 +59,15 @@ pub fn execute_plan_with_endpoints(
         dry_run: false,
         ..SyncSummary::default()
     };
-    let mut worker_tasks = Vec::new();
-    let mut delete_ops = Vec::new();
-
-    for operation in &plan.operations {
-        match operation {
-            PlanOperation::CreateDirectory { relative_path } => {
-                endpoints.target().create_directory(relative_path)?;
-                summary.created_dirs += 1;
-            }
-            PlanOperation::CopyFile {
-                relative_path,
-                bytes,
-                reason,
-            } => worker_tasks.push(WorkerTask::CopyFile {
-                relative_path: relative_path.clone(),
-                bytes: *bytes,
-                reason: *reason,
-            }),
-            PlanOperation::SetMetadata { relative_path } => {
-                worker_tasks.push(WorkerTask::SetMetadata {
-                    relative_path: relative_path.clone(),
-                });
-            }
-            PlanOperation::DeleteFile { .. }
-            | PlanOperation::DeleteDirectory { .. }
-            | PlanOperation::DeleteSymlink { .. } => delete_ops.push(operation.clone()),
-        }
-    }
-
-    let report = run_workers(config, endpoints, worker_tasks)?;
+    let dispatch = prepare_plan_directories_and_deletes(endpoints, plan)?;
+    let report = run_workers(config, endpoints, plan)?;
+    summary.created_dirs += dispatch.created_dirs;
     summary.copied_files += report.copied_files;
     summary.metadata_updates += report.metadata_updates;
     summary.verified_files += report.verified_files;
     summary.bytes_copied += report.bytes_copied;
 
-    for operation in delete_ops {
+    for operation in dispatch.delete_ops {
         match operation {
             PlanOperation::DeleteFile { relative_path } => {
                 endpoints.target().delete_file(&relative_path)?;
@@ -116,6 +89,11 @@ pub fn execute_plan_with_endpoints(
     }
 
     Ok(summary)
+}
+
+struct DispatchReport {
+    created_dirs: usize,
+    delete_ops: Vec<PlanOperation>,
 }
 
 fn dry_run_summary(endpoints: &SyncEndpoints, plan: &SyncPlan) -> SyncSummary {
@@ -143,15 +121,36 @@ fn dry_run_summary(endpoints: &SyncEndpoints, plan: &SyncPlan) -> SyncSummary {
     summary
 }
 
+fn prepare_plan_directories_and_deletes(
+    endpoints: &SyncEndpoints,
+    plan: &SyncPlan,
+) -> Result<DispatchReport> {
+    let mut report = DispatchReport {
+        created_dirs: 0,
+        delete_ops: Vec::new(),
+    };
+
+    for operation in &plan.operations {
+        match operation {
+            PlanOperation::CreateDirectory { relative_path } => {
+                endpoints.target().create_directory(relative_path)?;
+                report.created_dirs += 1;
+            }
+            PlanOperation::DeleteFile { .. }
+            | PlanOperation::DeleteDirectory { .. }
+            | PlanOperation::DeleteSymlink { .. } => report.delete_ops.push(operation.clone()),
+            PlanOperation::CopyFile { .. } | PlanOperation::SetMetadata { .. } => {}
+        }
+    }
+
+    Ok(report)
+}
+
 fn run_workers(
     config: &SyncConfig,
     endpoints: &SyncEndpoints,
-    tasks: Vec<WorkerTask>,
+    plan: &SyncPlan,
 ) -> Result<WorkerReport> {
-    if tasks.is_empty() {
-        return Ok(WorkerReport::default());
-    }
-
     let (task_sender, task_receiver) = bounded(config.queue_size);
     let (report_sender, report_receiver) = unbounded();
 
@@ -165,17 +164,46 @@ fn run_workers(
         }
 
         drop(report_sender);
-        send_tasks(&task_sender, tasks);
+        dispatch_worker_operations(plan, &task_sender);
         drop(task_sender);
 
         collect_worker_reports(config, report_receiver)
     })
 }
 
-fn send_tasks(sender: &Sender<WorkerTask>, tasks: Vec<WorkerTask>) {
-    for task in tasks {
-        if sender.send(task).is_err() {
-            break;
+fn dispatch_worker_operations(plan: &SyncPlan, sender: &Sender<WorkerTask>) {
+    for operation in &plan.operations {
+        match operation {
+            PlanOperation::CopyFile {
+                relative_path,
+                bytes,
+                reason,
+            } => {
+                if sender
+                    .send(WorkerTask::CopyFile {
+                        relative_path: relative_path.clone(),
+                        bytes: *bytes,
+                        reason: *reason,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            PlanOperation::SetMetadata { relative_path } => {
+                if sender
+                    .send(WorkerTask::SetMetadata {
+                        relative_path: relative_path.clone(),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            PlanOperation::CreateDirectory { .. }
+            | PlanOperation::DeleteFile { .. }
+            | PlanOperation::DeleteDirectory { .. }
+            | PlanOperation::DeleteSymlink { .. } => {}
         }
     }
 }
@@ -291,4 +319,56 @@ fn copy_one_file(
     report.bytes_copied = report.bytes_copied.saturating_add(bytes);
     info!(path = %relative_path.display(), bytes, "{}", tr_current("log.file_copied"));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use tempfile::tempdir;
+
+    use crate::cli::Cli;
+    use crate::config::SyncConfig;
+
+    use super::*;
+
+    #[test]
+    fn execute_plan_streams_worker_tasks_without_losing_operations()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        fs::create_dir(source.path().join("nested"))?;
+        fs::write(source.path().join("nested").join("a.txt"), "alpha")?;
+        fs::write(source.path().join("b.txt"), "beta")?;
+
+        let cli = Cli::for_test(source.path(), target.path());
+        let config = SyncConfig::try_from(cli)?;
+        let mut plan = SyncPlan::default();
+        plan.push(PlanOperation::CreateDirectory {
+            relative_path: PathBuf::from("nested"),
+        });
+        plan.push(PlanOperation::CopyFile {
+            relative_path: PathBuf::from("nested").join("a.txt"),
+            bytes: 5,
+            reason: CopyReason::Missing,
+        });
+        plan.push(PlanOperation::CopyFile {
+            relative_path: PathBuf::from("b.txt"),
+            bytes: 4,
+            reason: CopyReason::Missing,
+        });
+
+        let summary = execute_plan(&config, &plan)?;
+
+        assert_eq!(
+            fs::read_to_string(target.path().join("nested").join("a.txt"))?,
+            "alpha"
+        );
+        assert_eq!(fs::read_to_string(target.path().join("b.txt"))?, "beta");
+        assert_eq!(summary.created_dirs, 1);
+        assert_eq!(summary.copied_files, 2);
+        assert_eq!(summary.bytes_copied, 9);
+        Ok(())
+    }
 }

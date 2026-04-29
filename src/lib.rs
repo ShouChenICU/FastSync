@@ -54,8 +54,22 @@ pub fn run_sync_with_endpoints(
         crate::i18n::tr_current("log.scan_started")
     );
 
+    let phase_started = Instant::now();
     let source_snapshot = endpoints.scan_source(config.follow_symlinks)?;
+    info!(
+        phase = "scan_source",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        "{}",
+        crate::i18n::tr_current("log.phase_finished")
+    );
+    let phase_started = Instant::now();
     let target_snapshot = endpoints.scan_target(config.follow_symlinks)?;
+    info!(
+        phase = "scan_target",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        "{}",
+        crate::i18n::tr_current("log.phase_finished")
+    );
 
     info!(
         source_entries = source_snapshot.entries.len(),
@@ -64,7 +78,14 @@ pub fn run_sync_with_endpoints(
         crate::i18n::tr_current("log.scan_finished")
     );
 
+    let phase_started = Instant::now();
     let plan = build_plan_with_endpoints(&config, &endpoints, &source_snapshot, &target_snapshot)?;
+    info!(
+        phase = "build_plan",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        "{}",
+        crate::i18n::tr_current("log.phase_finished")
+    );
     info!(
         operations = plan.operations.len(),
         bytes = plan.bytes_to_copy,
@@ -72,7 +93,14 @@ pub fn run_sync_with_endpoints(
         crate::i18n::tr_current("log.plan_built")
     );
 
+    let phase_started = Instant::now();
     let mut summary = execute_plan_with_endpoints(&config, &endpoints, &plan)?;
+    info!(
+        phase = "execute_plan",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        "{}",
+        crate::i18n::tr_current("log.phase_finished")
+    );
     summary.source = endpoints.source().root().to_path_buf();
     summary.target = endpoints.target().root().to_path_buf();
     summary.source_entries = source_snapshot.entries.len();
@@ -82,7 +110,14 @@ pub fn run_sync_with_endpoints(
     summary.blake3_compared_files = plan.blake3_compared_files;
 
     if !config.dry_run && config.verify_mode.verify_all_files() {
+        let phase_started = Instant::now();
         let verified = verify_all_source_files_with_endpoints(&source_snapshot, &endpoints)?;
+        info!(
+            phase = "verify_all",
+            elapsed_ms = phase_started.elapsed().as_millis(),
+            "{}",
+            crate::i18n::tr_current("log.phase_finished")
+        );
         summary.verified_files += verified;
     }
 

@@ -12,17 +12,19 @@ use rand::Rng;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
 use crate::error::{FastSyncError, Result};
 use crate::hash::Blake3Digest;
-use crate::i18n::{Language, set_language, tr};
+use crate::i18n::{Language, set_language, tr, tr_current};
 use crate::summary::{human_bytes, human_duration};
 
 const DEFAULT_BIND_PORT: u16 = 7443;
-const PROTOCOL_VERSION: u16 = 5;
+const PROTOCOL_VERSION: u16 = 6;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const BUFFER_SIZE: usize = 1024 * 1024;
+const NETWORK_FILE_CONCURRENCY: usize = 4;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -663,7 +665,7 @@ async fn handle_share_connection(
 
     let summary = match direction {
         SyncDirection::Pull => {
-            send_tree(&config.root, &mut send, &mut recv).await?;
+            send_tree(&config.root, &connection, &mut send, &mut recv).await?;
             let ack = read_message(&mut recv).await?;
             match ack {
                 WireMessage::Ack {
@@ -686,7 +688,8 @@ async fn handle_share_connection(
             }
         }
         SyncDirection::Push => {
-            let summary = receive_tree(&config.root, &mut recv, &mut send, options).await?;
+            let summary =
+                receive_tree(&config.root, &connection, &mut recv, &mut send, options).await?;
             write_message(
                 &mut send,
                 &WireMessage::Ack {
@@ -782,6 +785,7 @@ async fn run_connect_async(config: ConnectConfig) -> Result<()> {
         SyncDirection::Pull => {
             let summary = receive_tree(
                 &config.directory,
+                &connection,
                 &mut recv,
                 &mut send,
                 config.transfer_options(),
@@ -800,7 +804,7 @@ async fn run_connect_async(config: ConnectConfig) -> Result<()> {
             summary
         }
         SyncDirection::Push => {
-            send_tree(&config.directory, &mut send, &mut recv).await?;
+            send_tree(&config.directory, &connection, &mut send, &mut recv).await?;
             match read_message(&mut recv).await? {
                 WireMessage::Ack {
                     files,
@@ -856,13 +860,31 @@ async fn finish_send_stream(send: &mut SendStream) -> Result<()> {
     Ok(())
 }
 
-async fn send_tree(root: &Path, send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
+async fn send_tree(
+    root: &Path,
+    connection: &quinn::Connection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+) -> Result<()> {
+    let phase_started = Instant::now();
     let manifest = send_manifest(root, send).await?;
+    info!(
+        phase = "network_send_manifest",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        "{}",
+        tr_current("log.phase_finished")
+    );
+    let phase_started = Instant::now();
     let hashes = serve_hash_requests(root, &manifest, send, recv).await?;
+    info!(
+        phase = "network_serve_hash_requests",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        "{}",
+        tr_current("log.phase_finished")
+    );
     let mut requested = read_requested_paths(recv).await?;
 
-    let mut total_bytes = 0_u64;
-    let mut sent_files = 0_usize;
+    let mut transfers = Vec::new();
     for file in &manifest.files {
         if !requested.remove(&file.path) {
             continue;
@@ -873,10 +895,7 @@ async fn send_tree(root: &Path, send: &mut SendStream, recv: &mut RecvStream) ->
             "sending file"
         );
         let transfer = file_transfer(root, file, hashes.get(&file.path).cloned())?;
-        write_message(send, &WireMessage::File(transfer.clone())).await?;
-        send_file(root, &transfer, send).await?;
-        sent_files += 1;
-        total_bytes = total_bytes.saturating_add(file.len);
+        transfers.push(transfer);
     }
     if !requested.is_empty() {
         return Err(other_message(
@@ -885,6 +904,16 @@ async fn send_tree(root: &Path, send: &mut SendStream, recv: &mut RecvStream) ->
         ));
     }
 
+    let phase_started = Instant::now();
+    let (sent_files, total_bytes) = send_files(root, connection, transfers).await?;
+    info!(
+        phase = "network_send_files",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        files = sent_files,
+        bytes = total_bytes,
+        "{}",
+        tr_current("log.phase_finished")
+    );
     write_message(send, &WireMessage::Done).await?;
     send.finish()
         .map_err(|error| other("finish QUIC send stream", error))?;
@@ -1005,11 +1034,19 @@ async fn read_requested_paths(recv: &mut RecvStream) -> Result<HashSet<PathBuf>>
 
 async fn receive_tree(
     root: &Path,
+    connection: &quinn::Connection,
     recv: &mut RecvStream,
     send: &mut SendStream,
     options: TransferOptions,
 ) -> Result<ReceiveSummary> {
+    let phase_started = Instant::now();
     let manifest = receive_manifest(root, recv, options).await?;
+    info!(
+        phase = "network_receive_manifest",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        "{}",
+        tr_current("log.phase_finished")
+    );
     info!(
         root = %root.display(),
         dirs = manifest.dirs.len(),
@@ -1017,39 +1054,54 @@ async fn receive_tree(
         bytes = manifest.files.iter().map(|file| file.len).sum::<u64>(),
         "receiving manifest"
     );
+    let phase_started = Instant::now();
     let requested_files = send_file_requests(root, &manifest, options.strict, send, recv).await?;
     info!(
-        requested_files,
-        skipped_files = manifest.files.len().saturating_sub(requested_files),
+        requested_files = requested_files.len(),
+        skipped_files = manifest.files.len().saturating_sub(requested_files.len()),
         strict = options.strict,
+        elapsed_ms = phase_started.elapsed().as_millis(),
         "planned network file requests"
     );
 
-    let mut files = 0_usize;
-    let mut bytes = 0_u64;
-    loop {
-        match read_message(recv).await? {
-            WireMessage::File(file) => {
-                info!(
-                    path = %file.path.display(),
-                    bytes = file.len,
-                    "receiving file"
-                );
-                receive_file(root, &file, recv, options).await?;
-                files += 1;
-                bytes = bytes.saturating_add(file.len);
-            }
-            WireMessage::Done => break,
-            _ => return Err(other_message("receive tree", "unexpected message")),
-        }
+    let phase_started = Instant::now();
+    let (files, bytes) =
+        receive_requested_files(root, connection, requested_files, options).await?;
+    info!(
+        phase = "network_receive_files",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        files,
+        bytes,
+        "{}",
+        tr_current("log.phase_finished")
+    );
+    match read_message(recv).await? {
+        WireMessage::Done => {}
+        _ => return Err(other_message("receive tree", "unexpected message")),
     }
     let deleted = if options.delete {
-        delete_obsolete(root, &manifest).await?
+        let phase_started = Instant::now();
+        let deleted = delete_obsolete(root, &manifest).await?;
+        info!(
+            phase = "network_delete_obsolete",
+            elapsed_ms = phase_started.elapsed().as_millis(),
+            deleted,
+            "{}",
+            tr_current("log.phase_finished")
+        );
+        deleted
     } else {
         0
     };
+    let phase_started = Instant::now();
     apply_file_metadata(root, &manifest.files, options)?;
     apply_directory_metadata(root, &manifest.dirs, options)?;
+    info!(
+        phase = "network_apply_metadata",
+        elapsed_ms = phase_started.elapsed().as_millis(),
+        "{}",
+        tr_current("log.phase_finished")
+    );
     info!(files, bytes, deleted, "finished receiving tree");
     Ok(ReceiveSummary {
         files,
@@ -1101,16 +1153,18 @@ async fn send_file_requests(
     strict: bool,
     send: &mut SendStream,
     recv: &mut RecvStream,
-) -> Result<usize> {
+) -> Result<Vec<PathBuf>> {
     let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
         Ok(snapshot) => snapshot,
         Err(FastSyncError::InvalidTarget(path)) if path == root => {
             write_message(send, &WireMessage::HashRequestEnd).await?;
-            return send_requested_file_paths(
-                manifest.files.iter().map(|file| file.path.clone()),
-                send,
-            )
-            .await;
+            let requested: Vec<_> = manifest
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect();
+            send_requested_file_paths(requested.iter().cloned(), send).await?;
+            return Ok(requested);
         }
         Err(error) => return Err(error),
     };
@@ -1130,7 +1184,8 @@ async fn send_file_requests(
         }
     }
     write_message(send, &WireMessage::HashRequestEnd).await?;
-    send_requested_file_paths(requested, send).await
+    send_requested_file_paths(requested.iter().cloned(), send).await?;
+    Ok(requested)
 }
 
 async fn request_remote_hash(
@@ -1337,6 +1392,59 @@ fn hash_manifest_path(root: &Path, path: &Path) -> Result<String> {
     crate::hash::blake3_file(&path).map(hex_digest)
 }
 
+async fn send_files(
+    root: &Path,
+    connection: &quinn::Connection,
+    transfers: Vec<FileTransfer>,
+) -> Result<(usize, u64)> {
+    let mut tasks = JoinSet::new();
+    let mut files = 0_usize;
+    let mut bytes = 0_u64;
+
+    for transfer in transfers {
+        while tasks.len() >= NETWORK_FILE_CONCURRENCY {
+            let (sent_files, sent_bytes) = join_file_task(&mut tasks).await?;
+            files += sent_files;
+            bytes = bytes.saturating_add(sent_bytes);
+        }
+
+        let root = root.to_path_buf();
+        let connection = connection.clone();
+        tasks.spawn(async move {
+            let bytes = transfer.len;
+            let mut stream = connection
+                .open_uni()
+                .await
+                .map_err(|error| other("open file transfer stream", error))?;
+            write_message(&mut stream, &WireMessage::File(transfer.clone())).await?;
+            send_file(&root, &transfer, &mut stream).await?;
+            finish_file_stream(&mut stream).await?;
+            Ok((1_usize, bytes))
+        });
+    }
+
+    while !tasks.is_empty() {
+        let (sent_files, sent_bytes) = join_file_task(&mut tasks).await?;
+        files += sent_files;
+        bytes = bytes.saturating_add(sent_bytes);
+    }
+
+    Ok((files, bytes))
+}
+
+async fn finish_file_stream(send: &mut SendStream) -> Result<()> {
+    send.finish()
+        .map_err(|error| other("finish QUIC file stream", error))
+}
+
+async fn join_file_task(tasks: &mut JoinSet<Result<(usize, u64)>>) -> Result<(usize, u64)> {
+    match tasks.join_next().await {
+        Some(Ok(result)) => result,
+        Some(Err(error)) => Err(other("join network file transfer task", error)),
+        None => Ok((0, 0)),
+    }
+}
+
 async fn send_file(root: &Path, file: &FileTransfer, send: &mut SendStream) -> Result<()> {
     let path = safe_join(root, &file.path)?;
     let mut input = tokio::fs::File::open(&path)
@@ -1363,6 +1471,68 @@ async fn send_file(root: &Path, file: &FileTransfer, send: &mut SendStream) -> R
     }
 
     Ok(())
+}
+
+async fn receive_requested_files(
+    root: &Path,
+    connection: &quinn::Connection,
+    requested_files: Vec<PathBuf>,
+    options: TransferOptions,
+) -> Result<(usize, u64)> {
+    let requested: HashSet<_> = requested_files.into_iter().collect();
+    let mut started = HashSet::new();
+    let mut tasks = JoinSet::new();
+    let mut files = 0_usize;
+    let mut bytes = 0_u64;
+
+    for _ in 0..requested.len() {
+        while tasks.len() >= NETWORK_FILE_CONCURRENCY {
+            let (received_files, received_bytes) = join_file_task(&mut tasks).await?;
+            files += received_files;
+            bytes = bytes.saturating_add(received_bytes);
+        }
+
+        let mut stream = connection
+            .accept_uni()
+            .await
+            .map_err(|error| other("accept file transfer stream", error))?;
+        let file = match read_message(&mut stream).await? {
+            WireMessage::File(file) => file,
+            _ => return Err(other_message("receive file stream", "unexpected message")),
+        };
+        if !requested.contains(&file.path) {
+            return Err(other_message(
+                "receive file stream",
+                format!("unrequested file stream: {}", file.path.display()),
+            ));
+        }
+        if !started.insert(file.path.clone()) {
+            return Err(other_message(
+                "receive file stream",
+                format!("duplicate file stream: {}", file.path.display()),
+            ));
+        }
+
+        info!(
+            path = %file.path.display(),
+            bytes = file.len,
+            "receiving file"
+        );
+        let root = root.to_path_buf();
+        tasks.spawn(async move {
+            let bytes = file.len;
+            receive_file(&root, &file, &mut stream, options).await?;
+            Ok((1_usize, bytes))
+        });
+    }
+
+    while !tasks.is_empty() {
+        let (received_files, received_bytes) = join_file_task(&mut tasks).await?;
+        files += received_files;
+        bytes = bytes.saturating_add(received_bytes);
+    }
+
+    Ok((files, bytes))
 }
 
 async fn receive_file(
@@ -2041,10 +2211,59 @@ mod wire_path {
 mod tests {
     use super::*;
 
+    struct ConnectedPair {
+        _server_endpoint: Endpoint,
+        _client_endpoint: Endpoint,
+        server: quinn::Connection,
+        client: quinn::Connection,
+    }
+
+    async fn connected_pair() -> std::result::Result<ConnectedPair, Box<dyn std::error::Error>> {
+        install_crypto_provider();
+        let server_endpoint = Endpoint::server(server_config()?, "127.0.0.1:0".parse()?)?;
+        let server_addr = server_endpoint.local_addr()?;
+        let mut client_endpoint = Endpoint::client("127.0.0.1:0".parse()?)?;
+        client_endpoint.set_default_client_config(insecure_client_config());
+
+        let server_accept_endpoint = server_endpoint.clone();
+        let server_task = tokio::spawn(async move {
+            let incoming = server_accept_endpoint
+                .accept()
+                .await
+                .ok_or_else(|| std::io::Error::other("server endpoint closed before accepting"))?;
+            incoming.await.map_err(std::io::Error::other)
+        });
+        let client = client_endpoint
+            .connect(server_addr, "fastsync.local")?
+            .await?;
+        let server = server_task.await??;
+
+        Ok(ConnectedPair {
+            _server_endpoint: server_endpoint,
+            _client_endpoint: client_endpoint,
+            server,
+            client,
+        })
+    }
+
+    fn default_transfer_options() -> TransferOptions {
+        TransferOptions {
+            delete: false,
+            strict: false,
+            preserve_times: true,
+            preserve_permissions: false,
+        }
+    }
+
     #[test]
     fn send_mode_only_allows_pull() {
         assert!(ShareMode::Send.allows(SyncDirection::Pull));
         assert!(!ShareMode::Send.allows(SyncDirection::Push));
+    }
+
+    #[test]
+    fn parallel_file_stream_protocol_version_is_current() {
+        assert_eq!(PROTOCOL_VERSION, 6);
     }
 
     #[test]
@@ -2443,6 +2662,115 @@ mod tests {
             filetime::FileTime::from_last_modification_time(&std::fs::metadata(&target_file)?);
         assert!(requested.is_empty());
         assert_eq!(updated_time, source_time);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "opens local UDP sockets"]
+    async fn network_pull_transfers_requested_files_over_parallel_streams()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        std::fs::create_dir(source.path().join("nested"))?;
+        for index in 0..8 {
+            std::fs::write(
+                source.path().join(format!("file-{index}.txt")),
+                format!("content-{index}"),
+            )?;
+        }
+        std::fs::write(source.path().join("nested").join("deep.txt"), "deep")?;
+        let pair = connected_pair().await?;
+        let sender = async {
+            let (mut server_send, mut server_recv) = pair.server.open_bi().await?;
+            send_tree(
+                source.path(),
+                &pair.server,
+                &mut server_send,
+                &mut server_recv,
+            )
+            .await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let receiver = async {
+            let (mut client_send, mut client_recv) = pair.client.accept_bi().await?;
+            let summary = receive_tree(
+                target.path(),
+                &pair.client,
+                &mut client_recv,
+                &mut client_send,
+                default_transfer_options(),
+            )
+            .await?;
+            Ok::<ReceiveSummary, Box<dyn std::error::Error>>(summary)
+        };
+
+        let (_, summary) = tokio::try_join!(sender, receiver)?;
+
+        assert_eq!(summary.files, 9);
+        assert_eq!(
+            std::fs::read_to_string(target.path().join("nested").join("deep.txt"))?,
+            "deep"
+        );
+        for index in 0..8 {
+            assert_eq!(
+                std::fs::read_to_string(target.path().join(format!("file-{index}.txt")))?,
+                format!("content-{index}")
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "opens local UDP sockets"]
+    async fn network_push_skips_matching_files_and_transfers_only_requested()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempfile::tempdir()?;
+        let target = tempfile::tempdir()?;
+        std::fs::write(source.path().join("same.txt"), "same content")?;
+        std::fs::write(source.path().join("changed.txt"), "changed new content")?;
+        std::fs::write(source.path().join("missing.txt"), "missing content")?;
+        std::fs::write(target.path().join("same.txt"), "same content")?;
+        std::fs::write(target.path().join("changed.txt"), "old content")?;
+        let pair = connected_pair().await?;
+        let sender = async {
+            let (mut client_send, mut client_recv) = pair.client.open_bi().await?;
+            send_tree(
+                source.path(),
+                &pair.client,
+                &mut client_send,
+                &mut client_recv,
+            )
+            .await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let receiver = async {
+            let (mut server_send, mut server_recv) = pair.server.accept_bi().await?;
+            let summary = receive_tree(
+                target.path(),
+                &pair.server,
+                &mut server_recv,
+                &mut server_send,
+                default_transfer_options(),
+            )
+            .await?;
+            Ok::<ReceiveSummary, Box<dyn std::error::Error>>(summary)
+        };
+
+        let (_, summary) = tokio::try_join!(sender, receiver)?;
+
+        assert_eq!(summary.files, 2);
+        assert_eq!(
+            std::fs::read_to_string(target.path().join("same.txt"))?,
+            "same content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.path().join("changed.txt"))?,
+            "changed new content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.path().join("missing.txt"))?,
+            "missing content"
+        );
         Ok(())
     }
 
