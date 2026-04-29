@@ -20,6 +20,7 @@ fastsync is a fast directory synchronization tool written in Rust for large dire
 
 - Keep code logic clear, structurally complete, and maintainable for later iteration.
 - Split modules by responsibility. Keep scanning, comparison, scheduling, execution, verification, configuration, and errors clearly separated.
+- Prefer directory-backed modules for large features. When a module grows toward 2000 lines, split it by responsibility before adding more behavior; avoid single source files over 2000 lines unless there is a documented reason.
 - Public structs, important functions, concurrency boundaries, and error branches should have concise Chinese comments that explain inputs, outputs, constraints, and failure semantics.
 - Avoid unexplained `unwrap` or `expect`; propagate errors through `Result` and add useful context.
 - Encapsulate I/O, concurrency, hashing, and path handling logic into testable units instead of piling complex behavior into entry points.

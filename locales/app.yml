@@ -82,13 +82,13 @@ cli.network_help:
   en: |-
     Network one-shot commands:
       fastsync s <DIRECTORY> [-r|-m send|receive|both] [-a]
-      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d] [--strict]
+      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d] [--strict] [--network-concurrency N]
 
     Use `fastsync share --help` or `fastsync connect --help` for network sync details.
   zh-CN: |-
     一次性网络同步命令：
       fastsync s <DIRECTORY> [-r|-m send|receive|both] [-a]
-      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d] [--strict]
+      fastsync c HOST[:PORT] <DIRECTORY> [-u] [-c CODE] [-d] [--strict] [--network-concurrency N]
 
     使用 `fastsync share --help` 或 `fastsync connect --help` 查看网络同步详情。
 
@@ -190,6 +190,9 @@ network.connect.no_preserve_times:
 network.connect.preserve_permissions:
   en: "Preserve source permission bits on received files and directories. Disabled by default."
   zh-CN: "在接收的文件和目录上保留源端权限位。默认关闭。"
+network.connect.network_concurrency:
+  en: "Maximum concurrent network file streams. Defaults to 4."
+  zh-CN: "最大并发网络文件流数量。默认 4。"
 network.summary.title:
   en: "network sync complete"
   zh-CN: "网络同步完成"
@@ -223,6 +226,9 @@ network.summary.directory:
 network.summary.remote:
   en: "Remote"
   zh-CN: "对端"
+network.summary.concurrency:
+  en: "File concurrency"
+  zh-CN: "文件并发"
 network.summary.files:
   en: "Files"
   zh-CN: "文件"
@@ -235,6 +241,9 @@ network.summary.deleted:
 network.summary.duration:
   en: "Duration"
   zh-CN: "耗时"
+network.summary.throughput:
+  en: "Throughput"
+  zh-CN: "吞吐"
 
 summary.status.dry_run_done:
   en: "Dry run complete"
