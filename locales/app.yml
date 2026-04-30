@@ -1,8 +1,8 @@
 _version: 2
 
 cli.about:
-  en: "A fast, reliable one-way directory synchronization tool"
-  zh-CN: "快速、可靠的单向目录同步工具"
+  en: "A fast, reliable one-way directory synchronization tool for local and network sync"
+  zh-CN: "支持本地与网络同步的快速、可靠单向目录同步工具"
 cli.usage:
   en: "Usage"
   zh-CN: "用法"

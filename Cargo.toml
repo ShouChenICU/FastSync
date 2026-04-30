@@ -1,10 +1,10 @@
 [package]
 name = "fastsync"
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 rust-version = "1.85"
 authors = ["ShouChen"]
-description = "A fast, safe one-way directory synchronization tool for large local folders."
+description = "A fast, safe one-way directory synchronization tool for local folders and network transfers."
 license = "MIT"
 repository = "https://github.com/ShouChenICU/FastSync"
 homepage = "https://github.com/ShouChenICU/FastSync"

@@ -7,12 +7,13 @@ use quinn::Endpoint;
 use crate::i18n::Language;
 
 use super::{
-    MAX_MESSAGE_SIZE, NetworkCommand, PROTOCOL_VERSION, ShareMode, SyncDirection,
+    ConnectConfig, MAX_MESSAGE_SIZE, NetworkCommand, PROTOCOL_VERSION, ShareConfig, ShareMode,
+    SyncDirection,
     cli::validate_pairing_code,
     protocol::{FileManifest, FileTransfer, Manifest, TransferOptions, WireMessage, WireMetadata},
     protocol_io::{read_message, write_message},
-    session::install_crypto_provider,
-    summary::{NetworkSide, NetworkSummary, ReceiveSummary},
+    session::{handle_share_connection, install_crypto_provider},
+    summary::{NetworkSide, NetworkSummary, ReceiveSummary, ShareOutcome},
     transfer::*,
     util::*,
 };
@@ -62,6 +63,97 @@ fn default_transfer_options() -> TransferOptions {
     }
 }
 
+fn share_config(root: &Path, mode: ShareMode, allow_delete: bool) -> ShareConfig {
+    ShareConfig {
+        root: root.to_path_buf(),
+        bind: "127.0.0.1:0"
+            .parse()
+            .expect("test bind address should parse"),
+        mode,
+        allow_delete,
+        code: Some("123456".to_string()),
+        max_failures: 1,
+        language: Language::DEFAULT,
+        log_level: crate::config::LogLevel::Error,
+    }
+}
+
+async fn rejected_share_hello(
+    config: ShareConfig,
+    expected_code: String,
+    hello: WireMessage,
+) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    let pair = connected_pair().await?;
+    let remote = "127.0.0.1:1".parse()?;
+    let server = pair.server;
+    let client = pair.client;
+    let server_task = tokio::spawn(async move {
+        handle_share_connection(&config, &expected_code, server, remote).await
+    });
+
+    let (mut send, mut recv) = client.open_bi().await?;
+    write_message(&mut send, &hello).await?;
+    let message = tokio::time::timeout(Duration::from_secs(1), read_message(&mut recv)).await??;
+    let WireMessage::Reject { reason } = message else {
+        return Err("expected pairing rejection".into());
+    };
+    client.close(0_u32.into(), b"test done");
+
+    match tokio::time::timeout(Duration::from_secs(1), server_task).await??? {
+        ShareOutcome::Rejected(server_reason) => {
+            assert_eq!(server_reason, reason);
+        }
+        ShareOutcome::Completed(_) => return Err("server unexpectedly completed sync".into()),
+    }
+
+    Ok(reason)
+}
+
+async fn transfer_tree_over_udp(
+    source: &Path,
+    target: &Path,
+    options: TransferOptions,
+) -> std::result::Result<ReceiveSummary, Box<dyn std::error::Error>> {
+    let ConnectedPair {
+        _server_endpoint,
+        _client_endpoint,
+        server,
+        client,
+    } = connected_pair().await?;
+    let source = source.to_path_buf();
+    let target = target.to_path_buf();
+    let sender_options = options;
+    let receiver_options = options;
+
+    let sender = async {
+        let (mut server_send, mut server_recv) = server.open_bi().await?;
+        send_tree(
+            &source,
+            &server,
+            &mut server_send,
+            &mut server_recv,
+            sender_options,
+        )
+        .await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let receiver = async {
+        let (mut client_send, mut client_recv) = client.accept_bi().await?;
+        receive_tree(
+            &target,
+            &client,
+            &mut client_recv,
+            &mut client_send,
+            receiver_options,
+        )
+        .await
+        .map_err(Into::into)
+    };
+
+    let (_, summary) = tokio::try_join!(sender, receiver)?;
+    Ok(summary)
+}
+
 #[test]
 fn send_mode_only_allows_pull() {
     assert!(ShareMode::Send.allows(SyncDirection::Pull));
@@ -77,6 +169,104 @@ fn parallel_file_stream_protocol_version_is_current() {
 fn safe_join_rejects_escape_paths() {
     assert!(safe_join(Path::new("/tmp/root"), Path::new("../x")).is_err());
     assert!(safe_join(Path::new("/tmp/root"), Path::new("/x")).is_err());
+}
+
+#[tokio::test]
+async fn resolve_endpoint_accepts_quic_scheme_and_default_port()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let explicit = resolve_endpoint("quic://127.0.0.1:12345").await?;
+    let defaulted = resolve_endpoint("127.0.0.1").await?;
+
+    assert_eq!(explicit.port(), 12345);
+    assert_eq!(defaulted.port(), super::DEFAULT_BIND_PORT);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "opens local UDP sockets"]
+async fn share_pairing_rejects_invalid_code() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
+    let root = tempfile::tempdir()?;
+    let reason = rejected_share_hello(
+        share_config(root.path(), ShareMode::Send, false),
+        "123456".to_string(),
+        WireMessage::Hello {
+            code: "000000".to_string(),
+            direction: SyncDirection::Pull,
+            protocol: PROTOCOL_VERSION,
+            options: default_transfer_options(),
+        },
+    )
+    .await?;
+
+    assert_eq!(reason, "invalid pairing code");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "opens local UDP sockets"]
+async fn share_pairing_rejects_unsupported_protocol()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let reason = rejected_share_hello(
+        share_config(root.path(), ShareMode::Send, false),
+        "123456".to_string(),
+        WireMessage::Hello {
+            code: "123456".to_string(),
+            direction: SyncDirection::Pull,
+            protocol: PROTOCOL_VERSION + 1,
+            options: default_transfer_options(),
+        },
+    )
+    .await?;
+
+    assert!(reason.contains("unsupported protocol version"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "opens local UDP sockets"]
+async fn share_pairing_rejects_disallowed_direction()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let reason = rejected_share_hello(
+        share_config(root.path(), ShareMode::Send, false),
+        "123456".to_string(),
+        WireMessage::Hello {
+            code: "123456".to_string(),
+            direction: SyncDirection::Push,
+            protocol: PROTOCOL_VERSION,
+            options: default_transfer_options(),
+        },
+    )
+    .await?;
+
+    assert!(reason.contains("is not allowed by server mode send"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "opens local UDP sockets"]
+async fn share_pairing_rejects_push_delete_when_not_allowed()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let mut options = default_transfer_options();
+    options.delete = true;
+
+    let reason = rejected_share_hello(
+        share_config(root.path(), ShareMode::Receive, false),
+        "123456".to_string(),
+        WireMessage::Hello {
+            code: "123456".to_string(),
+            direction: SyncDirection::Push,
+            protocol: PROTOCOL_VERSION,
+            options,
+        },
+    )
+    .await?;
+
+    assert_eq!(reason, "server does not allow delete for push");
+    Ok(())
 }
 
 #[test]
@@ -219,6 +409,37 @@ fn next_chunk_len_handles_remaining_larger_than_usize() {
 }
 
 #[test]
+fn network_utility_formats_digest_and_throughput() {
+    let mut digest = [0_u8; 32];
+    digest[0] = 1;
+    digest[31] = 255;
+
+    assert_eq!(
+        hex_digest(digest),
+        "01000000000000000000000000000000000000000000000000000000000000ff"
+    );
+    assert_eq!(throughput_bps(2_000, 1_000), 2_000);
+    assert_eq!(throughput_bps(2_000, 0), 0);
+    assert_eq!(throughput_text(2_048, 1_000), "2.0 KiB/s");
+}
+
+#[test]
+fn network_unique_temp_path_stays_in_parent() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
+    let parent = tempfile::tempdir()?;
+
+    let path = unique_temp_path(parent.path());
+
+    assert!(path.starts_with(parent.path()));
+    assert!(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".fastsync.net.tmp."))
+    );
+    Ok(())
+}
+
+#[test]
 fn share_shortcuts_parse_to_receive_mode() {
     let command = NetworkCommand::parse_from(
         vec![
@@ -303,6 +524,52 @@ fn generated_pairing_code_is_six_digits() {
 
     assert_eq!(code.len(), 6);
     assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
+}
+
+#[test]
+fn network_session_rejects_missing_share_root_before_accepting_connections()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let missing = root.path().join("missing");
+    let config = ShareConfig {
+        root: missing.clone(),
+        bind: "127.0.0.1:0".parse()?,
+        mode: ShareMode::Send,
+        allow_delete: false,
+        code: Some("123456".to_string()),
+        max_failures: 1,
+        language: Language::DEFAULT,
+        log_level: crate::config::LogLevel::Error,
+    };
+
+    let error = super::run_share(config).expect_err("missing share root should fail");
+
+    assert!(matches!(error, crate::error::FastSyncError::InvalidSource(path) if path == missing));
+    Ok(())
+}
+
+#[test]
+fn network_session_rejects_invalid_endpoint_port_before_connecting()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let config = ConnectConfig {
+        endpoint: "localhost:not-a-port".to_string(),
+        directory: directory.path().to_path_buf(),
+        direction: SyncDirection::Pull,
+        delete: false,
+        strict: false,
+        preserve_times: true,
+        preserve_permissions: false,
+        network_concurrency: 4,
+        code: Some("123456".to_string()),
+        language: Language::DEFAULT,
+        log_level: crate::config::LogLevel::Error,
+    };
+
+    let error = super::run_connect(config).expect_err("invalid endpoint port should fail");
+
+    assert!(error.to_string().contains("parse QUIC endpoint port"));
+    Ok(())
 }
 
 #[test]
@@ -670,6 +937,110 @@ async fn network_push_skips_matching_files_and_transfers_only_requested()
         std::fs::read_to_string(target.path().join("missing.txt"))?,
         "missing content"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "opens local UDP sockets"]
+async fn network_pull_noops_when_target_already_matches()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let target = tempfile::tempdir()?;
+    let source_file = source.path().join("same.txt");
+    let target_file = target.path().join("same.txt");
+    std::fs::write(&source_file, "same content")?;
+    std::fs::write(&target_file, "same content")?;
+    let timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+    filetime::set_file_mtime(&source_file, timestamp)?;
+    filetime::set_file_mtime(&target_file, timestamp)?;
+
+    let summary =
+        transfer_tree_over_udp(source.path(), target.path(), default_transfer_options()).await?;
+
+    assert_eq!(summary.files, 0);
+    assert_eq!(summary.bytes, 0);
+    assert_eq!(summary.deleted, 0);
+    assert_eq!(std::fs::read_to_string(target_file)?, "same content");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "opens local UDP sockets"]
+async fn network_strict_pull_replaces_same_metadata_different_content()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let target = tempfile::tempdir()?;
+    let source_file = source.path().join("same-meta.txt");
+    let target_file = target.path().join("same-meta.txt");
+    std::fs::write(&source_file, "aaaa")?;
+    std::fs::write(&target_file, "bbbb")?;
+    let timestamp = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+    filetime::set_file_mtime(&source_file, timestamp)?;
+    filetime::set_file_mtime(&target_file, timestamp)?;
+    let mut options = default_transfer_options();
+    options.strict = true;
+
+    let summary = transfer_tree_over_udp(source.path(), target.path(), options).await?;
+
+    assert_eq!(summary.files, 1);
+    assert_eq!(std::fs::read_to_string(target_file)?, "aaaa");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "opens local UDP sockets"]
+async fn network_pull_delete_removes_obsolete_target_entries()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let target = tempfile::tempdir()?;
+    std::fs::write(source.path().join("keep.txt"), "keep")?;
+    std::fs::write(target.path().join("stale.txt"), "stale")?;
+    let stale_dir = target.path().join("stale-dir");
+    std::fs::create_dir(&stale_dir)?;
+    std::fs::write(stale_dir.join("old.txt"), "old")?;
+    let mut options = default_transfer_options();
+    options.delete = true;
+
+    let summary = transfer_tree_over_udp(source.path(), target.path(), options).await?;
+
+    assert_eq!(summary.files, 1);
+    assert_eq!(summary.deleted, 3);
+    assert_eq!(
+        std::fs::read_to_string(target.path().join("keep.txt"))?,
+        "keep"
+    );
+    assert!(!target.path().join("stale.txt").exists());
+    assert!(!stale_dir.exists());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "opens local UDP sockets"]
+async fn network_pull_preserves_file_and_directory_times()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let target = tempfile::tempdir()?;
+    let source_dir = source.path().join("nested");
+    let source_file = source_dir.join("a.txt");
+    std::fs::create_dir(&source_dir)?;
+    std::fs::write(&source_file, "hello")?;
+    let file_time = filetime::FileTime::from_unix_time(1_700_000_001, 0);
+    let dir_time = filetime::FileTime::from_unix_time(1_700_000_002, 0);
+    filetime::set_file_mtime(&source_file, file_time)?;
+    filetime::set_file_mtime(&source_dir, dir_time)?;
+
+    let summary =
+        transfer_tree_over_udp(source.path(), target.path(), default_transfer_options()).await?;
+
+    let target_dir = target.path().join("nested");
+    let target_file = target_dir.join("a.txt");
+    let received_file_time =
+        filetime::FileTime::from_last_modification_time(&std::fs::metadata(&target_file)?);
+    let received_dir_time =
+        filetime::FileTime::from_last_modification_time(&std::fs::metadata(&target_dir)?);
+    assert_eq!(summary.files, 1);
+    assert_eq!(received_file_time, file_time);
+    assert_eq!(received_dir_time, dir_time);
     Ok(())
 }
 

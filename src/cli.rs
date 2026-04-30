@@ -540,17 +540,19 @@ mod tests {
     fn default_help_is_english() {
         let help = Cli::command(Language::En).render_long_help().to_string();
 
-        assert!(help.contains("A fast, reliable one-way directory synchronization tool"));
+        assert!(help.contains(
+            "A fast, reliable one-way directory synchronization tool for local and network sync"
+        ));
         assert!(help.contains("Source directory."));
         assert!(help.contains("Trust metadata when it matches"));
-        assert!(!help.contains("快速、可靠的单向目录同步工具"));
+        assert!(!help.contains("支持本地与网络同步的快速、可靠单向目录同步工具"));
     }
 
     #[test]
     fn zh_cn_help_is_chinese() {
         let help = Cli::command(Language::ZhCn).render_long_help().to_string();
 
-        assert!(help.contains("快速、可靠的单向目录同步工具"));
+        assert!(help.contains("支持本地与网络同步的快速、可靠单向目录同步工具"));
         assert!(help.contains("源目录。"));
         assert!(help.contains("元数据一致时信任元数据"));
     }

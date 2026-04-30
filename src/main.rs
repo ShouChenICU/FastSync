@@ -133,3 +133,57 @@ fn init_tracing_level(log_level: LogLevel) {
         .with_target(false)
         .init();
 }
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    #[test]
+    fn detects_network_subcommands_and_aliases() {
+        for command in ["share", "s", "connect", "c"] {
+            let args = vec![OsString::from("fastsync"), OsString::from(command)];
+
+            assert!(is_network_command(&args));
+        }
+
+        let local_args = vec![
+            OsString::from("fastsync"),
+            OsString::from("source"),
+            OsString::from("target"),
+        ];
+        assert!(!is_network_command(&local_args));
+    }
+
+    #[test]
+    fn empty_network_invocation_maps_aliases_to_canonical_help() {
+        assert_eq!(
+            empty_network_invocation(&[OsString::from("fastsync"), OsString::from("share")]),
+            Some("share")
+        );
+        assert_eq!(
+            empty_network_invocation(&[OsString::from("fastsync"), OsString::from("s")]),
+            Some("share")
+        );
+        assert_eq!(
+            empty_network_invocation(&[OsString::from("fastsync"), OsString::from("connect")]),
+            Some("connect")
+        );
+        assert_eq!(
+            empty_network_invocation(&[OsString::from("fastsync"), OsString::from("c")]),
+            Some("connect")
+        );
+    }
+
+    #[test]
+    fn non_empty_network_invocation_is_not_help_fallback() {
+        let args = [
+            OsString::from("fastsync"),
+            OsString::from("share"),
+            OsString::from("/tmp/share"),
+        ];
+
+        assert_eq!(empty_network_invocation(&args), None);
+    }
+}

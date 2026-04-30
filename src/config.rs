@@ -291,3 +291,108 @@ impl ValueEnum for OutputMode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use crate::cli::Cli;
+    use crate::error::FastSyncError;
+
+    use super::*;
+
+    #[test]
+    fn cli_config_rejects_missing_source() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        let missing = root.path().join("missing");
+        let target = root.path().join("target");
+        let cli = Cli::parse_from([
+            "fastsync",
+            missing.to_str().expect("temp path should be UTF-8"),
+            target.to_str().expect("temp path should be UTF-8"),
+        ]);
+
+        let error = SyncConfig::try_from(cli).expect_err("missing source must be rejected");
+
+        assert!(matches!(error, FastSyncError::InvalidSource(path) if path == missing));
+        Ok(())
+    }
+
+    #[test]
+    fn cli_config_normalizes_runtime_options() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        let cli = Cli::parse_from([
+            "fastsync",
+            source.path().to_str().expect("temp path should be UTF-8"),
+            target.path().to_str().expect("temp path should be UTF-8"),
+            "--strict",
+            "--verify",
+            "all",
+            "--no-sync-metadata",
+            "--preserve-times",
+            "false",
+            "--preserve-permissions",
+            "true",
+            "--no-atomic-write",
+            "--threads",
+            "0",
+            "--queue-size",
+            "0",
+            "--max-errors",
+            "3",
+            "--stop-on-error",
+            "--output",
+            "json",
+            "--log-level",
+            "debug",
+        ]);
+
+        let config = SyncConfig::try_from(cli)?;
+
+        assert_eq!(config.compare_mode, CompareMode::Strict);
+        assert_eq!(config.verify_mode, VerifyMode::All);
+        assert!(!config.sync_metadata);
+        assert_eq!(config.preserve_times, PreserveMode::False);
+        assert_eq!(config.preserve_permissions, PreserveMode::True);
+        assert!(!config.atomic_write);
+        assert_eq!(config.threads, 1);
+        assert_eq!(config.queue_size, 1);
+        assert_eq!(config.max_errors, 3);
+        assert!(config.stop_on_error);
+        assert_eq!(config.output, OutputMode::Json);
+        assert_eq!(config.log_level, LogLevel::Debug);
+        Ok(())
+    }
+
+    #[test]
+    fn syncs_file_metadata_requires_enabled_metadata_and_preserve_mode() {
+        let mut config = SyncConfig {
+            source: "source".into(),
+            target: "target".into(),
+            dry_run: false,
+            delete: false,
+            follow_symlinks: false,
+            compare_mode: CompareMode::Fast,
+            hash_algorithm: HashAlgorithm::Blake3,
+            verify_mode: VerifyMode::Changed,
+            sync_metadata: true,
+            preserve_times: PreserveMode::False,
+            preserve_permissions: PreserveMode::False,
+            atomic_write: true,
+            threads: 1,
+            queue_size: 1,
+            max_errors: 1,
+            stop_on_error: false,
+            output: OutputMode::Text,
+            log_level: LogLevel::Info,
+        };
+
+        assert!(!config.syncs_file_metadata());
+        config.preserve_times = PreserveMode::Auto;
+        assert!(config.syncs_file_metadata());
+        config.sync_metadata = false;
+        assert!(!config.syncs_file_metadata());
+    }
+}

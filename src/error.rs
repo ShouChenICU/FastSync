@@ -136,3 +136,60 @@ fn entry_kind_label(kind: &str) -> String {
         _ => kind.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+    use std::path::PathBuf;
+
+    use crate::i18n::{Language, set_language};
+
+    use super::*;
+
+    #[test]
+    fn display_formats_path_type_conflict_with_localized_kinds() {
+        set_language(Language::En);
+        let error = FastSyncError::PathTypeConflict {
+            relative_path: PathBuf::from("item"),
+            source_kind: "file",
+            target_kind: "directory",
+        };
+
+        let text = error.to_string();
+
+        assert!(text.contains("item"));
+        assert!(text.contains("file") || text.contains("文件"));
+        assert!(text.contains("directory") || text.contains("目录"));
+    }
+
+    #[test]
+    fn display_formats_many_and_verification_errors() {
+        set_language(Language::En);
+        let many = FastSyncError::Many {
+            count: 2,
+            first: "copy failed".to_string(),
+        };
+        let verification = FastSyncError::VerificationFailed(PathBuf::from("a.txt"));
+
+        assert!(many.to_string().contains("2 errors occurred"));
+        assert!(many.to_string().contains("copy failed"));
+        assert!(
+            verification
+                .to_string()
+                .contains("post-copy verification failed")
+        );
+        assert!(verification.to_string().contains("a.txt"));
+    }
+
+    #[test]
+    fn io_error_exposes_source_error() {
+        let error = io_context(
+            "open file",
+            std::fs::File::open("/path/that/should/not/exist"),
+        )
+        .expect_err("missing file should fail");
+
+        assert!(error.to_string().contains("open file"));
+        assert!(error.source().is_some());
+    }
+}
