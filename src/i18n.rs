@@ -38,11 +38,12 @@ impl Language {
         language_from_env_var("FASTSYNC_LANG").or_else(Self::from_system_env)
     }
 
-    /// 从系统 locale 环境变量读取语言，用于适配 Linux/macOS 终端环境。
+    /// 从系统 locale 环境变量或 Windows UI 语言读取语言。
     pub fn from_system_env() -> Option<Self> {
         ["LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"]
             .into_iter()
             .find_map(language_from_env_var)
+            .or_else(language_from_windows_user_default_ui_language)
     }
 
     fn parse_one(raw: &str) -> Option<Self> {
@@ -87,6 +88,38 @@ fn normalize_locale(raw: &str) -> Option<String> {
         .to_ascii_lowercase();
 
     (!normalized.is_empty()).then_some(normalized)
+}
+
+#[cfg(windows)]
+fn language_from_windows_user_default_ui_language() -> Option<Language> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetUserDefaultUILanguage() -> u16;
+    }
+
+    // SAFETY: GetUserDefaultUILanguage has no parameters and only reads the
+    // current user's Windows UI language from the operating system.
+    let langid = unsafe { GetUserDefaultUILanguage() };
+
+    language_from_windows_langid(langid)
+}
+
+#[cfg(not(windows))]
+fn language_from_windows_user_default_ui_language() -> Option<Language> {
+    None
+}
+
+#[cfg(any(windows, test))]
+fn language_from_windows_langid(langid: u16) -> Option<Language> {
+    const PRIMARY_LANGUAGE_MASK: u16 = 0x03ff;
+    const LANG_CHINESE: u16 = 0x04;
+    const LANG_ENGLISH: u16 = 0x09;
+
+    match langid & PRIMARY_LANGUAGE_MASK {
+        LANG_CHINESE => Some(Language::ZhCn),
+        LANG_ENGLISH => Some(Language::En),
+        _ => None,
+    }
 }
 
 /// 设置当前线程后续翻译使用的语言。
@@ -185,5 +218,13 @@ mod tests {
     fn parses_language_priority_list() {
         assert_eq!(Language::parse("fr_FR:zh_CN:en_US"), Some(Language::ZhCn));
         assert_eq!(Language::parse("fr_FR:en_US"), Some(Language::En));
+    }
+
+    #[test]
+    fn maps_windows_langid_to_supported_language() {
+        assert_eq!(language_from_windows_langid(0x0804), Some(Language::ZhCn));
+        assert_eq!(language_from_windows_langid(0x0404), Some(Language::ZhCn));
+        assert_eq!(language_from_windows_langid(0x0409), Some(Language::En));
+        assert_eq!(language_from_windows_langid(0x040c), None);
     }
 }
