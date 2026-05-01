@@ -14,6 +14,7 @@ pub mod hash;
 pub mod i18n;
 pub mod network;
 pub mod plan;
+mod progress;
 pub mod scan;
 pub mod summary;
 pub mod verify;
@@ -22,11 +23,12 @@ use std::time::Instant;
 
 use tracing::info;
 
-use crate::compare::build_plan_with_endpoints;
+use crate::compare::build_plan_with_progress;
 use crate::config::SyncConfig;
 use crate::endpoint::SyncEndpoints;
 use crate::error::Result;
-use crate::executor::execute_plan_with_endpoints;
+use crate::executor::execute_plan_with_progress;
+use crate::progress::SyncProgress;
 use crate::summary::SyncSummary;
 use crate::verify::verify_all_source_files_with_endpoints;
 
@@ -36,7 +38,16 @@ use crate::verify::verify_all_source_files_with_endpoints;
 /// 也不直接渲染终端输出，方便后续被测试、GUI 或服务化入口复用。
 pub fn run_sync(config: SyncConfig) -> Result<SyncSummary> {
     let endpoints = SyncEndpoints::local(config.source.clone(), config.target.clone());
-    run_sync_with_endpoints(config, endpoints)
+    run_sync_with_endpoints_progress(config, endpoints, false)
+}
+
+/// 执行一次单向目录同步，并在调用方确认适合时启用交互式进度条。
+///
+/// 该入口供 CLI 在 text + TTY 环境下调用；库调用者默认使用 `run_sync` 即可
+/// 保持无终端副作用。进度条只观察阶段进展，不改变同步计划或执行语义。
+pub fn run_sync_with_progress(config: SyncConfig, progress: bool) -> Result<SyncSummary> {
+    let endpoints = SyncEndpoints::local(config.source.clone(), config.target.clone());
+    run_sync_with_endpoints_progress(config, endpoints, progress)
 }
 
 /// 使用给定端点执行一次单向目录同步。
@@ -46,7 +57,20 @@ pub fn run_sync_with_endpoints(
     config: SyncConfig,
     endpoints: SyncEndpoints,
 ) -> Result<SyncSummary> {
+    run_sync_with_endpoints_progress(config, endpoints, false)
+}
+
+/// 使用给定端点执行一次单向目录同步，并可启用交互式进度条。
+///
+/// 该函数保留端点注入能力，同时让 CLI 能把 TTY 判定结果传入库层。非 CLI
+/// 调用者通常应使用无进度的 `run_sync_with_endpoints`。
+pub fn run_sync_with_endpoints_progress(
+    config: SyncConfig,
+    endpoints: SyncEndpoints,
+    show_progress: bool,
+) -> Result<SyncSummary> {
     let started = Instant::now();
+    let progress = SyncProgress::new(show_progress);
     info!(
         source = %endpoints.source().root().display(),
         target = %endpoints.target().root().display(),
@@ -55,7 +79,9 @@ pub fn run_sync_with_endpoints(
     );
 
     let phase_started = Instant::now();
+    let scan_source_progress = progress.spinner("progress.scan_source");
     let source_snapshot = endpoints.scan_source(config.follow_symlinks)?;
+    scan_source_progress.finish();
     info!(
         phase = "scan_source",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -63,7 +89,9 @@ pub fn run_sync_with_endpoints(
         crate::i18n::tr_current("log.phase_finished")
     );
     let phase_started = Instant::now();
+    let scan_target_progress = progress.spinner("progress.scan_target");
     let target_snapshot = endpoints.scan_target(config.follow_symlinks)?;
+    scan_target_progress.finish();
     info!(
         phase = "scan_target",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -79,7 +107,15 @@ pub fn run_sync_with_endpoints(
     );
 
     let phase_started = Instant::now();
-    let plan = build_plan_with_endpoints(&config, &endpoints, &source_snapshot, &target_snapshot)?;
+    let plan_progress = progress.bar("progress.build_plan", source_snapshot.entries.len());
+    let plan = build_plan_with_progress(
+        &config,
+        &endpoints,
+        &source_snapshot,
+        &target_snapshot,
+        &plan_progress,
+    )?;
+    plan_progress.finish();
     info!(
         phase = "build_plan",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -94,7 +130,9 @@ pub fn run_sync_with_endpoints(
     );
 
     let phase_started = Instant::now();
-    let mut summary = execute_plan_with_endpoints(&config, &endpoints, &plan)?;
+    let execute_progress = progress.bar("progress.execute_plan", plan.operations.len());
+    let mut summary = execute_plan_with_progress(&config, &endpoints, &plan, &execute_progress)?;
+    execute_progress.finish();
     info!(
         phase = "execute_plan",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -111,7 +149,9 @@ pub fn run_sync_with_endpoints(
 
     if !config.dry_run && config.verify_mode.verify_all_files() {
         let phase_started = Instant::now();
+        let verify_progress = progress.spinner("progress.verify_all");
         let verified = verify_all_source_files_with_endpoints(&source_snapshot, &endpoints)?;
+        verify_progress.finish();
         info!(
             phase = "verify_all",
             elapsed_ms = phase_started.elapsed().as_millis(),

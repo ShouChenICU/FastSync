@@ -5,7 +5,11 @@ use fastsync::cli::Cli;
 use fastsync::config::{LogLevel, OutputMode, SyncConfig};
 use fastsync::i18n::{self, tr};
 use fastsync::network::NetworkCommand;
+use tracing_indicatif::IndicatifLayer;
+use tracing_indicatif::filter::IndicatifFilter;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::util::SubscriberInitExt;
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
@@ -42,7 +46,7 @@ fn main() -> ExitCode {
         return match command {
             NetworkCommand::Share(config) => {
                 i18n::set_language(config.language);
-                init_tracing_level(config.log_level);
+                init_tracing_level(config.log_level, false);
                 match fastsync::network::run_share(config) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(error) => {
@@ -53,7 +57,7 @@ fn main() -> ExitCode {
             }
             NetworkCommand::Connect(config) => {
                 i18n::set_language(config.language);
-                init_tracing_level(config.log_level);
+                init_tracing_level(config.log_level, false);
                 match fastsync::network::run_connect(config) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(error) => {
@@ -67,7 +71,8 @@ fn main() -> ExitCode {
 
     let cli = Cli::parse_from(args);
     i18n::set_language(cli.language);
-    init_tracing_level(cli.log_level);
+    let progress = should_enable_progress(cli.output);
+    init_tracing_level(cli.log_level, progress);
 
     let output = cli.output;
     let language = cli.language;
@@ -79,7 +84,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match fastsync::run_sync(config) {
+    match fastsync::run_sync_with_progress(config, progress) {
         Ok(summary) => {
             match output {
                 OutputMode::Text => {
@@ -125,13 +130,36 @@ fn empty_network_invocation(args: &[std::ffi::OsString]) -> Option<&'static str>
     }
 }
 
-fn init_tracing_level(log_level: LogLevel) {
+fn should_enable_progress(output: OutputMode) -> bool {
+    output == OutputMode::Text
+        && std::io::stderr().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var_os("TERM").is_none_or(|term| term != "dumb")
+}
+
+fn init_tracing_level(log_level: LogLevel, progress: bool) {
     let filter = EnvFilter::new(log_level.as_str());
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .init();
+    if progress {
+        let indicatif_layer = IndicatifLayer::new();
+        let stderr_writer = indicatif_layer.get_stderr_writer();
+        let indicatif_layer = indicatif_layer.with_filter(IndicatifFilter::new(false));
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_writer(stderr_writer)
+            .with_target(false)
+            .with_filter(filter);
+
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .with(indicatif_layer)
+            .init();
+    } else {
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_target(false)
+            .with_filter(filter);
+
+        tracing_subscriber::registry().with(fmt_layer).init();
+    }
 }
 
 #[cfg(test)]

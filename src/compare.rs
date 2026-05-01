@@ -4,6 +4,7 @@ use crate::config::{CompareMode, SyncConfig};
 use crate::endpoint::SyncEndpoints;
 use crate::error::{FastSyncError, Result};
 use crate::plan::{CopyReason, PlanOperation, SyncPlan};
+use crate::progress::ProgressPhase;
 use crate::scan::{EntryKind, FileEntry, Snapshot};
 
 /// 基于源/目标快照生成同步计划。
@@ -24,6 +25,26 @@ pub fn build_plan_with_endpoints(
     source: &Snapshot,
     target: &Snapshot,
 ) -> Result<SyncPlan> {
+    build_plan_with_progress(
+        config,
+        endpoints,
+        source,
+        target,
+        &ProgressPhase::disabled(),
+    )
+}
+
+/// 使用显式端点和进度句柄生成同步计划。
+///
+/// 进度句柄只记录比较阶段处理了多少条目、执行了多少次 BLAKE3 内容确认，
+/// 以及当前已生成的操作数量；它不改变比较策略和同步计划内容。
+pub(crate) fn build_plan_with_progress(
+    config: &SyncConfig,
+    endpoints: &SyncEndpoints,
+    source: &Snapshot,
+    target: &Snapshot,
+    progress: &ProgressPhase,
+) -> Result<SyncPlan> {
     let mut plan = SyncPlan::default();
 
     for source_entry in source.entries.values() {
@@ -40,6 +61,12 @@ pub fn build_plan_with_endpoints(
             EntryKind::File => plan_file(config, endpoints, source_entry, target, &mut plan)?,
             EntryKind::Symlink => {}
         }
+        progress.inc(1);
+        progress.set_plan_status(
+            plan.blake3_compared_files,
+            plan.operations.len(),
+            plan.bytes_to_copy,
+        );
     }
 
     if config.delete {

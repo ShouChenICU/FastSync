@@ -12,7 +12,7 @@ Mirror a source folder into a target folder, or share a folder once over the net
 [![BLAKE3](https://img.shields.io/badge/Compare-BLAKE3-brightgreen.svg)](https://github.com/BLAKE3-team/BLAKE3)
 [![GitHub](https://img.shields.io/badge/GitHub-ShouChenICU%2FFastSync-black.svg)](https://github.com/ShouChenICU/FastSync)
 
-[简体中文](README.zh-CN.md) · [Extreme Performance](#-extreme-performance) · [Network Sync](#-remote-folder-sync) · [Safety](#-safety-first-by-default) · [Install](#-install) · [CLI](#-cli-cheat-sheet)
+[简体中文](README.zh-CN.md) · [Extreme Performance](#-extreme-performance) · [Network Sync](#-remote-folder-sync) · [Progress](#-progress-and-logs) · [Safety](#-safety-first-by-default) · [Install](#-install) · [CLI](#-cli-cheat-sheet)
 
 </div>
 
@@ -28,7 +28,7 @@ FastSync is built for large folders and short-lived directory handoffs where spe
 - **Fast by design**: metadata-aware comparison, BLAKE3, and concurrent workers.
 - **Network sync built in**: share or receive a folder once with a simple pairing code.
 - **Safe by default**: no implicit deletion, dry-run support, and temporary-file overwrite writes.
-- **Clear after every run**: readable summaries for humans, JSON for scripts.
+- **Clear while it runs and after it finishes**: terminal progress, readable summaries for humans, and JSON for scripts.
 
 ```mermaid
 flowchart LR
@@ -132,6 +132,9 @@ FASTSYNC_LANG=zh-CN fastsync --help
 | Output JSON for scripts            | `fastsync -o json ./source ./target`  |
 | Share a folder once                | `fastsync s ./source`                 |
 | Receive a shared folder            | `fastsync c host ./target -c 123456`  |
+
+Interactive text runs show a bottom progress indicator; scripted and JSON runs
+stay clean. See [Progress And Logs](#-progress-and-logs).
 
 <details>
 <summary><strong>Example: safe backup mirror</strong></summary>
@@ -266,6 +269,26 @@ Post-copy verification is controlled by `--verify`:
 
 The summary reports BLAKE3 content checks in two separate counters: comparison-time checks used by `fast` or `strict`, and post-copy verifications controlled by `--verify`.
 New files that do not exist in the target are copied directly and are not counted as post-copy BLAKE3 verifications.
+
+## 📟 Progress And Logs
+
+When running in an interactive terminal with text output, fastsync shows a bottom
+progress indicator for local sync stages:
+
+- Scanning source and target directories.
+- Building the sync plan, including processed entries, planned operations, planned data, and BLAKE3 comparison count.
+- Executing the sync plan.
+- Full verification when `--verify all` is enabled.
+
+The progress UI is designed for humans at a terminal. It is automatically hidden
+for JSON output, non-TTY output, `TERM=dumb`, and `NO_COLOR` environments. The
+summary and JSON output continue to use stdout, while logs and progress render on
+stderr so scripts can consume stdout safely.
+
+fastsync routes tracing logs through a progress-aware writer when the progress UI
+is active, so log lines and the bottom indicator can coexist without corrupting
+each other. Increase `--log-level` when you need more detail; progress remains a
+visual status layer and does not change sync behavior.
 
 ## 🧾 CLI Cheat Sheet
 

@@ -34,6 +34,7 @@ Before finalizing a code-change task, ensure that:
 - Filesystem behavior is correct for symlinks, empty directories, permissions, timestamps, overwrites, partial failures, and delete behavior when touched.
 - I/O, concurrency, hashing, path handling, and network protocol logic remain encapsulated in testable units.
 - User-facing CLI help, text summaries, errors, I/O contexts, and log messages remain internationalized.
+- Interactive progress indicators remain terminal-safe, logging-compatible, and disabled for machine-readable or non-interactive output.
 - Relevant tests or documented boundary cases cover sync correctness, delete behavior, concurrent execution, verification logic, and network protocol behavior touched by the change.
 - Validation commands have passed, or any inability to run them is explained with the next best check.
 
@@ -62,6 +63,18 @@ Before finalizing a code-change task, ensure that:
 - Public structs, important functions, concurrency boundaries, and error branches should have concise Chinese comments that explain inputs, outputs, constraints, and failure semantics.
 - Encapsulate I/O, concurrency, hashing, and path handling logic into testable units instead of piling complex behavior into entry points.
 - For large files, prefer streaming reads and avoid loading whole files into memory.
+
+## Observable Progress And Logging
+
+- Interactive progress UI is optional observability, not synchronization logic. Keep it isolated behind progress-specific modules or adapters, and never let progress state affect scan, compare, copy, delete, verify, retry, or error semantics.
+- Show progress only for interactive text output. Disable it for JSON output, non-TTY stderr/stdout, `TERM=dumb`, `NO_COLOR`, tests, and library entry points unless the caller explicitly opts in.
+- Keep logs and progress bars compatible. When using `indicatif`/`tracing-indicatif`, route tracing output through the progress-aware writer so log lines do not corrupt the bottom progress indicator.
+- Keep machine-readable output clean. Progress must not write to stdout when summaries or JSON are expected there; prefer stderr for terminal UI.
+- Localize all user-visible progress labels and counters through `locales/app.yml`; do not hard-code progress text in core modules.
+- Prefer concise phase-level progress over noisy per-file logging. Long phases such as scanning, build-plan hashing, execution, and full verification should expose useful counters such as processed entries, generated operations, bytes planned, and BLAKE3 comparisons.
+- Progress handles used by worker threads must be cheap to clone, thread-safe, and no-op when disabled. They should remain safe to call from error paths so partial failures still advance or cleanly close the visible phase.
+- Preserve existing public API defaults: library calls should remain non-interactive by default, with explicit progress-enabled entry points for CLI or UI callers.
+- Document and test behavior at boundaries where practical: TTY gating, JSON cleanliness, i18n labels, and logging compatibility. If terminal rendering cannot be fully automated, perform or describe a focused manual check.
 
 ## Internationalization
 

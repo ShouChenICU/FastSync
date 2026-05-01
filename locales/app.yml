@@ -127,6 +127,34 @@ app.json_summary_failed:
   en: "failed to serialize JSON summary"
   zh-CN: "序列化 JSON 摘要失败"
 
+progress.scan_source:
+  en: "Scanning source"
+  zh-CN: "扫描源目录"
+progress.scan_target:
+  en: "Scanning target"
+  zh-CN: "扫描目标目录"
+progress.build_plan:
+  en: "Building plan"
+  zh-CN: "生成同步计划"
+progress.execute_plan:
+  en: "Executing plan"
+  zh-CN: "执行同步计划"
+progress.verify_all:
+  en: "Verifying files"
+  zh-CN: "校验文件"
+progress.starting:
+  en: "starting"
+  zh-CN: "准备中"
+progress.hashes:
+  en: "hashes"
+  zh-CN: "哈希"
+progress.operations:
+  en: "ops"
+  zh-CN: "操作"
+progress.data:
+  en: "data"
+  zh-CN: "数据"
+
 network.share.about:
   en: "Start a one-shot QUIC directory sharing session."
   zh-CN: "启动一次性 QUIC 目录共享会话。"

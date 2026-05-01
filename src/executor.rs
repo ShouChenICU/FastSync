@@ -9,6 +9,7 @@ use crate::endpoint::SyncEndpoints;
 use crate::error::{FastSyncError, Result};
 use crate::i18n::tr_current;
 use crate::plan::{CopyReason, PlanOperation, SyncPlan};
+use crate::progress::ProgressPhase;
 use crate::summary::SyncSummary;
 use crate::verify::verify_file_with_endpoints;
 
@@ -49,6 +50,19 @@ pub fn execute_plan_with_endpoints(
     endpoints: &SyncEndpoints,
     plan: &SyncPlan,
 ) -> Result<SyncSummary> {
+    execute_plan_with_progress(config, endpoints, plan, &ProgressPhase::disabled())
+}
+
+/// 使用显式端点和进度句柄执行同步计划。
+///
+/// 进度在每个计划操作完成或失败后递增，帮助交互式终端观察长时间复制、
+/// 元数据修正和删除过程；错误聚合、停止策略和执行顺序仍由原执行器控制。
+pub(crate) fn execute_plan_with_progress(
+    config: &SyncConfig,
+    endpoints: &SyncEndpoints,
+    plan: &SyncPlan,
+    progress: &ProgressPhase,
+) -> Result<SyncSummary> {
     if config.dry_run {
         return Ok(dry_run_summary(endpoints, plan));
     }
@@ -59,8 +73,8 @@ pub fn execute_plan_with_endpoints(
         dry_run: false,
         ..SyncSummary::default()
     };
-    let dispatch = prepare_plan_directories_and_deletes(endpoints, plan)?;
-    let report = run_workers(config, endpoints, plan)?;
+    let dispatch = prepare_plan_directories_and_deletes(endpoints, plan, progress)?;
+    let report = run_workers(config, endpoints, plan, progress)?;
     summary.created_dirs += dispatch.created_dirs;
     summary.copied_files += report.copied_files;
     summary.metadata_updates += report.metadata_updates;
@@ -73,16 +87,19 @@ pub fn execute_plan_with_endpoints(
                 endpoints.target().delete_file(&relative_path)?;
                 info!(path = %relative_path.display(), "{}", tr_current("log.file_deleted"));
                 summary.deleted_files += 1;
+                progress.inc(1);
             }
             PlanOperation::DeleteDirectory { relative_path } => {
                 endpoints.target().delete_directory(&relative_path)?;
                 info!(path = %relative_path.display(), "{}", tr_current("log.directory_deleted"));
                 summary.deleted_dirs += 1;
+                progress.inc(1);
             }
             PlanOperation::DeleteSymlink { relative_path } => {
                 endpoints.target().delete_symlink(&relative_path)?;
                 info!(path = %relative_path.display(), "{}", tr_current("log.symlink_deleted"));
                 summary.deleted_symlinks += 1;
+                progress.inc(1);
             }
             _ => {}
         }
@@ -124,6 +141,7 @@ fn dry_run_summary(endpoints: &SyncEndpoints, plan: &SyncPlan) -> SyncSummary {
 fn prepare_plan_directories_and_deletes(
     endpoints: &SyncEndpoints,
     plan: &SyncPlan,
+    progress: &ProgressPhase,
 ) -> Result<DispatchReport> {
     let mut report = DispatchReport {
         created_dirs: 0,
@@ -135,6 +153,7 @@ fn prepare_plan_directories_and_deletes(
             PlanOperation::CreateDirectory { relative_path } => {
                 endpoints.target().create_directory(relative_path)?;
                 report.created_dirs += 1;
+                progress.inc(1);
             }
             PlanOperation::DeleteFile { .. }
             | PlanOperation::DeleteDirectory { .. }
@@ -150,6 +169,7 @@ fn run_workers(
     config: &SyncConfig,
     endpoints: &SyncEndpoints,
     plan: &SyncPlan,
+    progress: &ProgressPhase,
 ) -> Result<WorkerReport> {
     let (task_sender, task_receiver) = bounded(config.queue_size);
     let (report_sender, report_receiver) = unbounded();
@@ -158,8 +178,16 @@ fn run_workers(
         for worker_id in 0..config.threads {
             let task_receiver = task_receiver.clone();
             let report_sender = report_sender.clone();
+            let progress = progress.clone();
             scope.spawn(move || {
-                worker_loop(worker_id, config, endpoints, task_receiver, report_sender)
+                worker_loop(
+                    worker_id,
+                    config,
+                    endpoints,
+                    task_receiver,
+                    report_sender,
+                    progress,
+                )
             });
         }
 
@@ -214,6 +242,7 @@ fn worker_loop(
     endpoints: &SyncEndpoints,
     receiver: Receiver<WorkerTask>,
     sender: Sender<Result<WorkerReport>>,
+    progress: ProgressPhase,
 ) {
     let mut report = WorkerReport::default();
 
@@ -241,10 +270,13 @@ fn worker_loop(
 
         if let Err(error) = result {
             let _ = sender.send(Err(error));
+            progress.inc(1);
             if config.stop_on_error {
                 debug!(worker_id, "{}", tr_current("log.worker_stop_on_error"));
                 return;
             }
+        } else {
+            progress.inc(1);
         }
     }
 
