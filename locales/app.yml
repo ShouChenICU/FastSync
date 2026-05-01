@@ -142,6 +142,33 @@ progress.execute_plan:
 progress.verify_all:
   en: "Verifying files"
   zh-CN: "校验文件"
+progress.network_send_manifest:
+  en: "Sending manifest"
+  zh-CN: "发送清单"
+progress.network_receive_manifest:
+  en: "Receiving manifest"
+  zh-CN: "接收清单"
+progress.network_serve_hashes:
+  en: "Serving hashes"
+  zh-CN: "响应哈希请求"
+progress.network_plan_requests:
+  en: "Planning requests"
+  zh-CN: "规划文件请求"
+progress.network_read_requests:
+  en: "Reading requests"
+  zh-CN: "读取文件请求"
+progress.network_send_files:
+  en: "Sending files"
+  zh-CN: "发送文件"
+progress.network_receive_files:
+  en: "Receiving files"
+  zh-CN: "接收文件"
+progress.network_delete_obsolete:
+  en: "Deleting obsolete"
+  zh-CN: "删除陈旧项"
+progress.network_apply_metadata:
+  en: "Applying metadata"
+  zh-CN: "应用元数据"
 progress.starting:
   en: "starting"
   zh-CN: "准备中"
@@ -154,6 +181,18 @@ progress.operations:
 progress.data:
   en: "data"
   zh-CN: "数据"
+progress.files:
+  en: "files"
+  zh-CN: "文件"
+progress.dirs:
+  en: "dirs"
+  zh-CN: "目录"
+progress.requests:
+  en: "requests"
+  zh-CN: "请求"
+progress.deleted:
+  en: "deleted"
+  zh-CN: "删除"
 
 network.share.about:
   en: "Start a one-shot QUIC directory sharing session."

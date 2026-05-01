@@ -9,6 +9,7 @@ use tracing::info;
 
 use crate::error::{FastSyncError, Result};
 use crate::i18n::tr_current;
+use crate::progress::{ProgressPhase, SyncProgress};
 
 use super::{
     BUFFER_SIZE, HASH_REQUEST_BATCH_SIZE,
@@ -23,6 +24,7 @@ use super::{
     },
 };
 
+#[cfg(test)]
 pub(super) async fn send_tree(
     root: &Path,
     connection: &quinn::Connection,
@@ -30,8 +32,33 @@ pub(super) async fn send_tree(
     recv: &mut RecvStream,
     options: TransferOptions,
 ) -> Result<()> {
+    send_tree_with_progress(
+        root,
+        connection,
+        send,
+        recv,
+        options,
+        &SyncProgress::new(false),
+    )
+    .await
+}
+
+/// 发送一棵目录树，并把网络侧长耗时阶段报告给交互式进度层。
+///
+/// 进度句柄只记录 manifest、哈希请求、文件请求和文件发送进展；协议消息、
+/// 安全校验、并发调度和错误语义仍由传输函数本身控制。
+pub(super) async fn send_tree_with_progress(
+    root: &Path,
+    connection: &quinn::Connection,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    options: TransferOptions,
+    progress: &SyncProgress,
+) -> Result<()> {
     let phase_started = Instant::now();
-    let manifest = send_manifest(root, send).await?;
+    let manifest_progress = progress.spinner("progress.network_send_manifest");
+    let manifest = send_manifest_with_progress(root, send, &manifest_progress).await?;
+    manifest_progress.finish();
     info!(
         phase = "network_send_manifest",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -39,25 +66,33 @@ pub(super) async fn send_tree(
         tr_current("log.phase_finished")
     );
     let phase_started = Instant::now();
-    let hashes = serve_hash_requests(root, &manifest, send, recv).await?;
+    let hash_progress = progress.spinner("progress.network_serve_hashes");
+    let hashes =
+        serve_hash_requests_with_progress(root, &manifest, send, recv, &hash_progress).await?;
+    hash_progress.finish();
     info!(
         phase = "network_serve_hash_requests",
         elapsed_ms = phase_started.elapsed().as_millis(),
         "{}",
         tr_current("log.phase_finished")
     );
-    let requested = read_requested_paths(recv).await?;
+    let request_progress = progress.spinner("progress.network_read_requests");
+    let requested = read_requested_paths_with_progress(recv, &request_progress).await?;
+    request_progress.finish();
 
     let phase_started = Instant::now();
-    let (sent_files, total_bytes) = send_requested_file_streams(
+    let send_progress = progress.bar("progress.network_send_files", requested.len());
+    let (sent_files, total_bytes) = send_requested_file_streams_with_progress(
         root,
         connection,
         &manifest,
         requested,
         &hashes,
         options.file_concurrency,
+        &send_progress,
     )
     .await?;
+    send_progress.finish();
     info!(
         phase = "network_send_files",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -79,12 +114,18 @@ pub(super) async fn send_tree(
     Ok(())
 }
 
-pub(super) async fn send_manifest(root: &Path, send: &mut SendStream) -> Result<Manifest> {
+/// 扫描本地目录并发送 manifest，同时记录 manifest 规模。
+async fn send_manifest_with_progress(
+    root: &Path,
+    send: &mut SendStream,
+    progress: &ProgressPhase,
+) -> Result<Manifest> {
     let snapshot = crate::scan::scan_directory(root, false)?;
     let mut manifest = Manifest {
         dirs: Vec::new(),
         files: Vec::new(),
     };
+    let mut bytes = 0_u64;
 
     write_message(send, &WireMessage::ManifestStart).await?;
     for entry in snapshot.entries.values() {
@@ -98,6 +139,7 @@ pub(super) async fn send_manifest(root: &Path, send: &mut SendStream) -> Result<
                 manifest.dirs.push(dir);
             }
             crate::scan::EntryKind::File => {
+                bytes = bytes.saturating_add(entry.len);
                 let file = FileManifest {
                     path: entry.relative_path.clone(),
                     len: entry.len,
@@ -108,6 +150,7 @@ pub(super) async fn send_manifest(root: &Path, send: &mut SendStream) -> Result<
             }
             crate::scan::EntryKind::Symlink => {}
         }
+        progress.set_manifest_status(manifest.dirs.len(), manifest.files.len(), bytes);
     }
     write_message(send, &WireMessage::ManifestEnd).await?;
 
@@ -121,11 +164,13 @@ pub(super) async fn send_manifest(root: &Path, send: &mut SendStream) -> Result<
     Ok(manifest)
 }
 
-pub(super) async fn serve_hash_requests(
+/// 响应对端发起的 BLAKE3 请求，并暴露已完成请求数。
+async fn serve_hash_requests_with_progress(
     root: &Path,
     manifest: &Manifest,
     send: &mut SendStream,
     recv: &mut RecvStream,
+    progress: &ProgressPhase,
 ) -> Result<HashMap<PathBuf, String>> {
     let manifest_paths: HashSet<_> = manifest
         .files
@@ -153,6 +198,7 @@ pub(super) async fn serve_hash_requests(
                 )
                 .await?;
                 hashes.insert(path, digest);
+                progress.set_request_status(hashes.len(), 0);
             }
             WireMessage::HashRequestEnd => break,
             _ => {
@@ -167,12 +213,22 @@ pub(super) async fn serve_hash_requests(
     Ok(hashes)
 }
 
+#[cfg(test)]
 pub(super) async fn read_requested_paths(recv: &mut RecvStream) -> Result<HashSet<PathBuf>> {
+    read_requested_paths_with_progress(recv, &ProgressPhase::disabled()).await
+}
+
+/// 读取接收端最终请求的文件列表，并显示请求数量。
+async fn read_requested_paths_with_progress(
+    recv: &mut RecvStream,
+    progress: &ProgressPhase,
+) -> Result<HashSet<PathBuf>> {
     let mut requested = HashSet::new();
     loop {
         match read_message(recv).await? {
             WireMessage::RequestFile { path } => {
                 requested.insert(path);
+                progress.set_request_status(0, requested.len());
             }
             WireMessage::RequestEnd => break,
             _ => {
@@ -186,6 +242,7 @@ pub(super) async fn read_requested_paths(recv: &mut RecvStream) -> Result<HashSe
     Ok(requested)
 }
 
+#[cfg(test)]
 pub(super) async fn receive_tree(
     root: &Path,
     connection: &quinn::Connection,
@@ -193,8 +250,32 @@ pub(super) async fn receive_tree(
     send: &mut SendStream,
     options: TransferOptions,
 ) -> Result<ReceiveSummary> {
+    receive_tree_with_progress(
+        root,
+        connection,
+        recv,
+        send,
+        options,
+        &SyncProgress::new(false),
+    )
+    .await
+}
+
+/// 接收一棵目录树，并把 manifest、请求规划、文件接收和清理阶段报告给进度层。
+///
+/// 该函数保持网络协议、校验和落盘语义不变；进度只作为终端观测信息存在。
+pub(super) async fn receive_tree_with_progress(
+    root: &Path,
+    connection: &quinn::Connection,
+    recv: &mut RecvStream,
+    send: &mut SendStream,
+    options: TransferOptions,
+    progress: &SyncProgress,
+) -> Result<ReceiveSummary> {
     let phase_started = Instant::now();
-    let manifest = receive_manifest(root, recv, options).await?;
+    let manifest_progress = progress.spinner("progress.network_receive_manifest");
+    let manifest = receive_manifest_with_progress(root, recv, options, &manifest_progress).await?;
+    manifest_progress.finish();
     info!(
         phase = "network_receive_manifest",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -209,7 +290,17 @@ pub(super) async fn receive_tree(
         "receiving manifest"
     );
     let phase_started = Instant::now();
-    let requested_files = send_file_requests(root, &manifest, options.strict, send, recv).await?;
+    let request_progress = progress.bar("progress.network_plan_requests", manifest.files.len());
+    let requested_files = send_file_requests_with_progress(
+        root,
+        &manifest,
+        options.strict,
+        send,
+        recv,
+        &request_progress,
+    )
+    .await?;
+    request_progress.finish();
     let requested_paths: HashSet<_> = requested_files.iter().cloned().collect();
     info!(
         requested_files = requested_files.len(),
@@ -220,8 +311,16 @@ pub(super) async fn receive_tree(
     );
 
     let phase_started = Instant::now();
-    let (files, bytes) =
-        receive_requested_files(root, connection, requested_files, options).await?;
+    let receive_progress = progress.bar("progress.network_receive_files", requested_files.len());
+    let (files, bytes) = receive_requested_files_with_progress(
+        root,
+        connection,
+        requested_files,
+        options,
+        &receive_progress,
+    )
+    .await?;
+    receive_progress.finish();
     info!(
         phase = "network_receive_files",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -238,7 +337,9 @@ pub(super) async fn receive_tree(
     }
     let deleted = if options.delete {
         let phase_started = Instant::now();
-        let deleted = delete_obsolete(root, &manifest).await?;
+        let delete_progress = progress.spinner("progress.network_delete_obsolete");
+        let deleted = delete_obsolete_with_progress(root, &manifest, &delete_progress).await?;
+        delete_progress.finish();
         info!(
             phase = "network_delete_obsolete",
             elapsed_ms = phase_started.elapsed().as_millis(),
@@ -251,6 +352,7 @@ pub(super) async fn receive_tree(
         0
     };
     let phase_started = Instant::now();
+    let metadata_progress = progress.spinner("progress.network_apply_metadata");
     let skipped_files: Vec<_> = manifest
         .files
         .iter()
@@ -259,6 +361,7 @@ pub(super) async fn receive_tree(
         .collect();
     apply_file_metadata(root, &skipped_files, options)?;
     apply_directory_metadata(root, &manifest.dirs, options)?;
+    metadata_progress.finish();
     info!(
         phase = "network_apply_metadata",
         elapsed_ms = phase_started.elapsed().as_millis(),
@@ -273,10 +376,12 @@ pub(super) async fn receive_tree(
     })
 }
 
-pub(super) async fn receive_manifest(
+/// 接收 manifest 并在创建目录时显示已接收的目录/文件规模。
+async fn receive_manifest_with_progress(
     root: &Path,
     recv: &mut RecvStream,
     options: TransferOptions,
+    progress: &ProgressPhase,
 ) -> Result<Manifest> {
     match read_message(recv).await? {
         WireMessage::ManifestStart => {}
@@ -291,6 +396,7 @@ pub(super) async fn receive_manifest(
         dirs: Vec::new(),
         files: Vec::new(),
     };
+    let mut bytes = 0_u64;
     loop {
         match read_message(recv).await? {
             WireMessage::ManifestDir(dir) => {
@@ -300,8 +406,13 @@ pub(super) async fn receive_manifest(
                     .await
                     .map_err(|error| io_path("create received directory", &path, error))?;
                 manifest.dirs.push(dir);
+                progress.set_manifest_status(manifest.dirs.len(), manifest.files.len(), bytes);
             }
-            WireMessage::ManifestFile(file) => manifest.files.push(file),
+            WireMessage::ManifestFile(file) => {
+                bytes = bytes.saturating_add(file.len);
+                manifest.files.push(file);
+                progress.set_manifest_status(manifest.dirs.len(), manifest.files.len(), bytes);
+            }
             WireMessage::ManifestEnd => break,
             _ => return Err(other_message("receive manifest", "unexpected message")),
         }
@@ -310,12 +421,36 @@ pub(super) async fn receive_manifest(
     Ok(manifest)
 }
 
+#[cfg(test)]
 pub(super) async fn send_file_requests(
     root: &Path,
     manifest: &Manifest,
     strict: bool,
     send: &mut SendStream,
     recv: &mut RecvStream,
+) -> Result<Vec<PathBuf>> {
+    send_file_requests_with_progress(
+        root,
+        manifest,
+        strict,
+        send,
+        recv,
+        &ProgressPhase::disabled(),
+    )
+    .await
+}
+
+/// 比较本地状态并向发送端提交需要传输的文件请求。
+///
+/// 该阶段可能触发本地哈希和远端哈希请求，进度会显示已检查文件数、
+/// 哈希比较数和最终请求数。
+async fn send_file_requests_with_progress(
+    root: &Path,
+    manifest: &Manifest,
+    strict: bool,
+    send: &mut SendStream,
+    recv: &mut RecvStream,
+    progress: &ProgressPhase,
 ) -> Result<Vec<PathBuf>> {
     let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
         Ok(snapshot) => snapshot,
@@ -327,6 +462,8 @@ pub(super) async fn send_file_requests(
                 .map(|file| file.path.clone())
                 .collect();
             send_requested_file_paths(requested.iter().cloned(), send).await?;
+            progress.inc(manifest.files.len() as u64);
+            progress.set_request_status(0, requested.len());
             return Ok(requested);
         }
         Err(error) => return Err(error),
@@ -347,15 +484,25 @@ pub(super) async fn send_file_requests(
                 hash_comparisons.push((file.path.clone(), local_digest));
             }
         }
+        progress.inc(1);
+        progress.set_request_status(hash_comparisons.len(), requested.len());
     }
 
     let hash_started = Instant::now();
-    let remote_hashes = request_remote_hashes(send, recv, &hash_comparisons).await?;
+    let remote_hashes = request_remote_hashes_with_progress(
+        send,
+        recv,
+        &hash_comparisons,
+        requested.len(),
+        progress,
+    )
+    .await?;
     let mut hash_changed = 0_usize;
     for (path, local_digest) in hash_comparisons {
         if remote_hashes.get(&path) != Some(&local_digest) {
             requested.push(path);
             hash_changed += 1;
+            progress.set_request_status(remote_hashes.len(), requested.len());
         }
     }
     info!(
@@ -375,10 +522,13 @@ pub(super) async fn send_file_requests(
     Ok(requested)
 }
 
-pub(super) async fn request_remote_hashes(
+/// 批量请求远端哈希，并在每个响应到达后更新比较进度。
+async fn request_remote_hashes_with_progress(
     send: &mut SendStream,
     recv: &mut RecvStream,
     comparisons: &[(PathBuf, String)],
+    existing_requests: usize,
+    progress: &ProgressPhase,
 ) -> Result<HashMap<PathBuf, String>> {
     let mut hashes = HashMap::new();
 
@@ -409,6 +559,7 @@ pub(super) async fn request_remote_hashes(
                             format!("duplicate hash response path: {}", path.display()),
                         ));
                     }
+                    progress.set_request_status(hashes.len(), existing_requests);
                 }
                 _ => {
                     return Err(other_message(
@@ -607,13 +758,15 @@ pub(super) fn hash_manifest_path(root: &Path, path: &Path) -> Result<String> {
     crate::hash::blake3_file(&path).map(hex_digest)
 }
 
-pub(super) async fn send_requested_file_streams(
+/// 并发发送接收端请求的文件，并按已完成文件数更新进度。
+async fn send_requested_file_streams_with_progress(
     root: &Path,
     connection: &quinn::Connection,
     manifest: &Manifest,
     requested: HashSet<PathBuf>,
     hashes: &HashMap<PathBuf, String>,
     file_concurrency: usize,
+    progress: &ProgressPhase,
 ) -> Result<(usize, u64)> {
     let manifest_paths: HashSet<_> = manifest
         .files
@@ -646,6 +799,8 @@ pub(super) async fn send_requested_file_streams(
             let (sent_files, sent_bytes) = join_file_task(&mut tasks).await?;
             files += sent_files;
             bytes = bytes.saturating_add(sent_bytes);
+            progress.inc(sent_files as u64);
+            progress.set_transfer_status(files, bytes);
         }
 
         let root = root.to_path_buf();
@@ -667,6 +822,8 @@ pub(super) async fn send_requested_file_streams(
         let (sent_files, sent_bytes) = join_file_task(&mut tasks).await?;
         files += sent_files;
         bytes = bytes.saturating_add(sent_bytes);
+        progress.inc(sent_files as u64);
+        progress.set_transfer_status(files, bytes);
     }
 
     Ok((files, bytes))
@@ -719,11 +876,13 @@ pub(super) async fn send_file(
     Ok(())
 }
 
-pub(super) async fn receive_requested_files(
+/// 并发接收已请求的文件流，并按已落盘文件数更新进度。
+async fn receive_requested_files_with_progress(
     root: &Path,
     connection: &quinn::Connection,
     requested_files: Vec<PathBuf>,
     options: TransferOptions,
+    progress: &ProgressPhase,
 ) -> Result<(usize, u64)> {
     let requested: HashSet<_> = requested_files.into_iter().collect();
     let mut started = HashSet::new();
@@ -736,6 +895,8 @@ pub(super) async fn receive_requested_files(
             let (received_files, received_bytes) = join_file_task(&mut tasks).await?;
             files += received_files;
             bytes = bytes.saturating_add(received_bytes);
+            progress.inc(received_files as u64);
+            progress.set_transfer_status(files, bytes);
         }
 
         let mut stream = connection
@@ -776,6 +937,8 @@ pub(super) async fn receive_requested_files(
         let (received_files, received_bytes) = join_file_task(&mut tasks).await?;
         files += received_files;
         bytes = bytes.saturating_add(received_bytes);
+        progress.inc(received_files as u64);
+        progress.set_transfer_status(files, bytes);
     }
 
     Ok((files, bytes))
@@ -912,7 +1075,17 @@ pub(super) async fn ensure_file_path(path: &Path, delete_enabled: bool) -> Resul
     }
 }
 
+#[cfg(test)]
 pub(super) async fn delete_obsolete(root: &Path, manifest: &Manifest) -> Result<usize> {
+    delete_obsolete_with_progress(root, manifest, &ProgressPhase::disabled()).await
+}
+
+/// 删除目标端中 manifest 不再包含的陈旧项，并展示已删除数量。
+async fn delete_obsolete_with_progress(
+    root: &Path,
+    manifest: &Manifest,
+    progress: &ProgressPhase,
+) -> Result<usize> {
     let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
         Ok(snapshot) => snapshot,
         Err(FastSyncError::InvalidTarget(path)) if path == root => return Ok(0),
@@ -951,6 +1124,7 @@ pub(super) async fn delete_obsolete(root: &Path, manifest: &Manifest) -> Result<
             }
         }
         deleted += 1;
+        progress.set_delete_status(deleted);
         info!(path = %entry.relative_path.display(), "deleted obsolete network entry");
     }
 

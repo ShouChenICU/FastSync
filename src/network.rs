@@ -12,7 +12,7 @@ mod util;
 mod tests;
 
 pub use cli::{ConnectConfig, NetworkCommand, ShareConfig, SyncDirection, print_subcommand_help};
-pub use session::{run_connect, run_share};
+pub use session::{run_connect, run_connect_with_progress, run_share, run_share_with_progress};
 
 const DEFAULT_BIND_PORT: u16 = 7443;
 const PROTOCOL_VERSION: u16 = 7;

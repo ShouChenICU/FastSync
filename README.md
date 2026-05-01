@@ -280,6 +280,15 @@ progress indicator for local sync stages:
 - Executing the sync plan.
 - Full verification when `--verify all` is enabled.
 
+Network `share` and `connect` commands also show progress for active transfer
+phases:
+
+- Sending and receiving manifests.
+- Serving or requesting BLAKE3 hashes for ambiguous files.
+- Planning requested files.
+- Sending and receiving file streams.
+- Deleting obsolete entries and applying received metadata when those phases run.
+
 The progress UI is designed for humans at a terminal. It is automatically hidden
 for JSON output, non-TTY output, `TERM=dumb`, and `NO_COLOR` environments. The
 summary and JSON output continue to use stdout, while logs and progress render on

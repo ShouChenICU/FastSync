@@ -279,6 +279,14 @@ fastsync c server.example.com ./project -u -d -c 123456
 - 执行同步计划。
 - 使用 `--verify all` 时执行全量校验。
 
+网络 `share` 和 `connect` 命令也会为正在进行的传输阶段显示进度：
+
+- 发送和接收 manifest。
+- 为可疑文件响应或请求 BLAKE3 哈希。
+- 规划需要请求的文件。
+- 发送和接收文件流。
+- 在相关阶段运行时，删除陈旧项并应用收到的元数据。
+
 进度 UI 面向终端用户。JSON 输出、非 TTY 输出、`TERM=dumb` 和 `NO_COLOR`
 环境会自动隐藏进度条。摘要和 JSON 继续写入 stdout，日志和进度写入
 stderr，因此脚本可以安全读取 stdout。

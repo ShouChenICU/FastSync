@@ -46,8 +46,9 @@ fn main() -> ExitCode {
         return match command {
             NetworkCommand::Share(config) => {
                 i18n::set_language(config.language);
-                init_tracing_level(config.log_level, false);
-                match fastsync::network::run_share(config) {
+                let progress = should_enable_terminal_progress();
+                init_tracing_level(config.log_level, progress);
+                match fastsync::network::run_share_with_progress(config, progress) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(error) => {
                         eprintln!("fastsync: {error}");
@@ -57,8 +58,9 @@ fn main() -> ExitCode {
             }
             NetworkCommand::Connect(config) => {
                 i18n::set_language(config.language);
-                init_tracing_level(config.log_level, false);
-                match fastsync::network::run_connect(config) {
+                let progress = should_enable_terminal_progress();
+                init_tracing_level(config.log_level, progress);
+                match fastsync::network::run_connect_with_progress(config, progress) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(error) => {
                         eprintln!("fastsync: {error}");
@@ -131,8 +133,11 @@ fn empty_network_invocation(args: &[std::ffi::OsString]) -> Option<&'static str>
 }
 
 fn should_enable_progress(output: OutputMode) -> bool {
-    output == OutputMode::Text
-        && std::io::stderr().is_terminal()
+    output == OutputMode::Text && should_enable_terminal_progress()
+}
+
+fn should_enable_terminal_progress() -> bool {
+    std::io::stderr().is_terminal()
         && std::env::var_os("NO_COLOR").is_none()
         && std::env::var_os("TERM").is_none_or(|term| term != "dumb")
 }

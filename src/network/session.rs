@@ -6,13 +6,14 @@ use tracing::{error, info, warn};
 
 use crate::error::{FastSyncError, Result};
 use crate::i18n::tr;
+use crate::progress::SyncProgress;
 
 use super::{
     ConnectConfig, PROTOCOL_VERSION, ShareConfig, SyncDirection,
     protocol::WireMessage,
     protocol_io::{read_message, write_message},
     summary::{NetworkSide, NetworkSummary, ReceiveSummary, ShareOutcome, TransferSummary},
-    transfer::{receive_tree, send_tree},
+    transfer::{receive_tree_with_progress, send_tree_with_progress},
     util::{
         generate_pairing_code, insecure_client_config, other, other_message, prompt_code,
         resolve_endpoint, server_config,
@@ -20,25 +21,37 @@ use super::{
 };
 
 pub fn run_share(config: ShareConfig) -> Result<()> {
+    run_share_with_progress(config, false)
+}
+
+/// 启动一次性 QUIC 共享服务端，并在调用方确认适合时启用交互式进度条。
+pub fn run_share_with_progress(config: ShareConfig, progress: bool) -> Result<()> {
     install_crypto_provider();
     let runtime =
         tokio::runtime::Runtime::new().map_err(|error| other("create tokio runtime", error))?;
-    runtime.block_on(run_share_async(config))
+    runtime.block_on(run_share_async_progress(config, progress))
 }
 
 /// 连接一次性 QUIC 共享服务端并执行同步。
 pub fn run_connect(config: ConnectConfig) -> Result<()> {
+    run_connect_with_progress(config, false)
+}
+
+/// 连接一次性 QUIC 共享服务端并执行同步，可按需启用交互式进度条。
+pub fn run_connect_with_progress(config: ConnectConfig, progress: bool) -> Result<()> {
     install_crypto_provider();
     let runtime =
         tokio::runtime::Runtime::new().map_err(|error| other("create tokio runtime", error))?;
-    runtime.block_on(run_connect_async(config))
+    runtime.block_on(run_connect_async_progress(config, progress))
 }
 
 pub(super) fn install_crypto_provider() {
     let _ = quinn::rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
-pub(super) async fn run_share_async(config: ShareConfig) -> Result<()> {
+pub(super) async fn run_share_async_progress(config: ShareConfig, progress: bool) -> Result<()> {
+    let progress = SyncProgress::new(progress);
+
     if !config.root.is_dir() {
         return Err(FastSyncError::InvalidSource(config.root));
     }
@@ -80,7 +93,9 @@ pub(super) async fn run_share_async(config: ShareConfig) -> Result<()> {
             }
         };
 
-        let result = handle_share_connection(&config, &code, connection, remote).await;
+        let result =
+            handle_share_connection_with_progress(&config, &code, connection, remote, &progress)
+                .await;
         match result {
             Ok(ShareOutcome::Completed(summary)) => {
                 println!(
@@ -136,11 +151,29 @@ pub(super) async fn run_share_async(config: ShareConfig) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn handle_share_connection(
     config: &ShareConfig,
     code: &str,
     connection: quinn::Connection,
     remote: SocketAddr,
+) -> Result<ShareOutcome> {
+    handle_share_connection_with_progress(
+        config,
+        code,
+        connection,
+        remote,
+        &SyncProgress::new(false),
+    )
+    .await
+}
+
+pub(super) async fn handle_share_connection_with_progress(
+    config: &ShareConfig,
+    code: &str,
+    connection: quinn::Connection,
+    remote: SocketAddr,
+    progress: &SyncProgress,
 ) -> Result<ShareOutcome> {
     let started = Instant::now();
     let (mut send, mut recv) = connection
@@ -206,7 +239,15 @@ pub(super) async fn handle_share_connection(
 
     let summary = match direction {
         SyncDirection::Pull => {
-            send_tree(&config.root, &connection, &mut send, &mut recv, options).await?;
+            send_tree_with_progress(
+                &config.root,
+                &connection,
+                &mut send,
+                &mut recv,
+                options,
+                progress,
+            )
+            .await?;
             let ack = read_message(&mut recv).await?;
             match ack {
                 WireMessage::Ack {
@@ -230,8 +271,15 @@ pub(super) async fn handle_share_connection(
             }
         }
         SyncDirection::Push => {
-            let summary =
-                receive_tree(&config.root, &connection, &mut recv, &mut send, options).await?;
+            let summary = receive_tree_with_progress(
+                &config.root,
+                &connection,
+                &mut recv,
+                &mut send,
+                options,
+                progress,
+            )
+            .await?;
             write_message(
                 &mut send,
                 &WireMessage::Ack {
@@ -268,7 +316,11 @@ pub(super) async fn reject_pairing(send: &mut SendStream, reason: String) -> Res
     Ok(ShareOutcome::Rejected(reason))
 }
 
-pub(super) async fn run_connect_async(config: ConnectConfig) -> Result<()> {
+pub(super) async fn run_connect_async_progress(
+    config: ConnectConfig,
+    progress: bool,
+) -> Result<()> {
+    let progress = SyncProgress::new(progress);
     let started = Instant::now();
     let code = match config.code {
         Some(ref code) => code.clone(),
@@ -326,12 +378,13 @@ pub(super) async fn run_connect_async(config: ConnectConfig) -> Result<()> {
 
     let summary = match config.direction {
         SyncDirection::Pull => {
-            let summary = receive_tree(
+            let summary = receive_tree_with_progress(
                 &config.directory,
                 &connection,
                 &mut recv,
                 &mut send,
                 config.transfer_options(),
+                &progress,
             )
             .await?;
             write_message(
@@ -347,12 +400,13 @@ pub(super) async fn run_connect_async(config: ConnectConfig) -> Result<()> {
             summary
         }
         SyncDirection::Push => {
-            send_tree(
+            send_tree_with_progress(
                 &config.directory,
                 &connection,
                 &mut send,
                 &mut recv,
                 config.transfer_options(),
+                &progress,
             )
             .await?;
             match read_message(&mut recv).await? {

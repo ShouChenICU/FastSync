@@ -129,6 +129,62 @@ impl ProgressPhase {
         ));
     }
 
+    /// 记录网络 manifest 阶段已观察到的目录、文件和总字节数。
+    pub(crate) fn set_manifest_status(&self, dirs: usize, files: usize, bytes: u64) {
+        if !self.enabled {
+            return;
+        }
+
+        self.set_message(&format!(
+            "{}={}  {}={}  {}={}",
+            tr_current("progress.dirs"),
+            dirs,
+            tr_current("progress.files"),
+            files,
+            tr_current("progress.data"),
+            human_bytes(bytes)
+        ));
+    }
+
+    /// 记录网络请求规划阶段的哈希比较和文件请求数量。
+    pub(crate) fn set_request_status(&self, hashes: usize, requests: usize) {
+        if !self.enabled {
+            return;
+        }
+
+        self.set_message(&format!(
+            "{}={}  {}={}",
+            tr_current("progress.hashes"),
+            hashes,
+            tr_current("progress.requests"),
+            requests
+        ));
+    }
+
+    /// 记录网络文件传输阶段已完成的文件数和数据量。
+    pub(crate) fn set_transfer_status(&self, files: usize, bytes: u64) {
+        if !self.enabled {
+            return;
+        }
+
+        self.set_message(&format!(
+            "{}={}  {}={}",
+            tr_current("progress.files"),
+            files,
+            tr_current("progress.data"),
+            human_bytes(bytes)
+        ));
+    }
+
+    /// 记录删除阶段已删除的目标端陈旧项数量。
+    pub(crate) fn set_delete_status(&self, deleted: usize) {
+        if !self.enabled {
+            return;
+        }
+
+        self.set_message(&format!("{}={}", tr_current("progress.deleted"), deleted));
+    }
+
     /// 标记阶段完成。
     ///
     /// tracing-indicatif 会在 span 关闭时移除底部进度条，最终结果仍由
