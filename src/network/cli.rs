@@ -2,7 +2,9 @@ use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
+use clap::builder::{
+    NonEmptyStringValueParser, PossibleValue, PossibleValuesParser, TypedValueParser,
+};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use serde::{Deserialize, Serialize};
 
@@ -394,15 +396,15 @@ fn language_arg(language: Language) -> Arg {
     Arg::new("language")
         .long("lang")
         .value_name("LOCALE")
-        .value_parser(
-            PossibleValuesParser::new([
-                PossibleValue::new("en"),
-                PossibleValue::new("zh-CN").aliases(["zh", "zh-cn", "zh_CN"]),
-            ])
-            .map(|value| Language::parse(&value).expect("validated by clap possible values")),
-        )
+        .value_parser(language_parser())
         .default_value(language.as_locale())
         .help(tr(language, "cli.lang"))
+}
+
+fn language_parser() -> impl TypedValueParser<Value = Language> + 'static {
+    NonEmptyStringValueParser::new().try_map(|value| {
+        Language::parse(&value).ok_or_else(|| format!("unsupported locale: {value}"))
+    })
 }
 
 fn help_arg(language: Language) -> Arg {

@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::str::FromStr;
 
 use rust_i18n::t;
 
@@ -62,6 +63,14 @@ impl Language {
         }
 
         None
+    }
+}
+
+impl FromStr for Language {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw).ok_or_else(|| format!("unsupported locale: {raw}"))
     }
 }
 
@@ -204,6 +213,113 @@ pub fn tr_many_errors(count: usize, first: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn from_str_supports_normalized_language_names() {
+        assert_eq!(
+            "zh_CN.UTF-8".parse::<Language>().expect("zh_CN.UTF-8"),
+            Language::ZhCn
+        );
+        assert_eq!("C".parse::<Language>().expect("C"), Language::En);
+        assert_eq!("en-GB".parse::<Language>().expect("en-GB"), Language::En);
+        assert_eq!(
+            "zh-Hans-CN".parse::<Language>().expect("zh-Hans-CN"),
+            Language::ZhCn
+        );
+    }
+
+    #[test]
+    fn from_str_rejects_unknown_locale() {
+        assert!("fr_FR".parse::<Language>().is_err());
+    }
+
+    #[test]
+    fn from_env_prefers_fastsync_lang_over_system_locale() {
+        let _guard = env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let snapshot = snapshot_env_vars();
+
+        set_env_var("FASTSYNC_LANG", Some("zh_CN.UTF-8"));
+        set_env_var("LC_ALL", Some("en-US"));
+        set_env_var("LC_MESSAGES", Some("zh-CN"));
+
+        assert_eq!(Language::from_env(), Some(Language::ZhCn));
+
+        restore_env_vars(snapshot);
+    }
+
+    #[test]
+    fn from_system_env_honors_locale_priority() {
+        let _guard = env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let snapshot = snapshot_env_vars();
+
+        set_env_var("FASTSYNC_LANG", None);
+        set_env_var("LC_ALL", Some("zh_CN.UTF-8"));
+        set_env_var("LC_MESSAGES", Some("en-US.UTF-8"));
+        set_env_var("LANGUAGE", Some("en-US"));
+        set_env_var("LANG", Some("zh-CN"));
+
+        assert_eq!(Language::from_system_env(), Some(Language::ZhCn));
+
+        restore_env_vars(snapshot);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn from_env_returns_none_for_invalid_values() {
+        let _guard = env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let snapshot = snapshot_env_vars();
+
+        set_env_var("FASTSYNC_LANG", Some("fr_FR"));
+        set_env_var("LC_ALL", Some("de_DE"));
+        set_env_var("LC_MESSAGES", Some("jp_JP"));
+        set_env_var("LANGUAGE", Some("ru_RU"));
+        set_env_var("LANG", Some("xx_XX"));
+
+        assert_eq!(Language::from_env(), None);
+
+        restore_env_vars(snapshot);
+    }
+
+    fn env_test_lock() -> &'static Mutex<()> {
+        static ENV_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_TEST_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn snapshot_env_vars() -> Vec<(String, Option<String>)> {
+        ["FASTSYNC_LANG", "LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"]
+            .into_iter()
+            .map(|name| (name.to_string(), env::var(name).ok()))
+            .collect()
+    }
+
+    fn restore_env_vars(snapshot: Vec<(String, Option<String>)>) {
+        for (name, value) in snapshot {
+            set_env_var(&name, value.as_deref());
+        }
+    }
+
+    fn set_env_var(name: &str, value: Option<&str>) {
+        match value {
+            Some(value) => {
+                // SAFETY: These tests serialize all mutations of the locale-related
+                // environment variables through env_test_lock.
+                unsafe { env::set_var(name, value) };
+            }
+            None => {
+                // SAFETY: These tests serialize all mutations of the locale-related
+                // environment variables through env_test_lock.
+                unsafe { env::remove_var(name) };
+            }
+        }
+    }
 
     #[test]
     fn parses_common_linux_locale_names() {

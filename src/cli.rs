@@ -1,7 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
+use clap::builder::{
+    NonEmptyStringValueParser, PossibleValue, PossibleValuesParser, TypedValueParser,
+};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 
 use crate::config::{CompareMode, HashAlgorithm, LogLevel, OutputMode, PreserveMode, VerifyMode};
@@ -502,30 +504,9 @@ fn output_mode_parser() -> impl TypedValueParser<Value = OutputMode> + 'static {
 }
 
 fn language_parser() -> impl TypedValueParser<Value = Language> + 'static {
-    PossibleValuesParser::new([
-        PossibleValue::new("en").aliases([
-            "en-US",
-            "en_US",
-            "en_US.UTF-8",
-            "english",
-            "C",
-            "POSIX",
-        ]),
-        PossibleValue::new("zh-CN").aliases([
-            "zh",
-            "zh-cn",
-            "zh_CN",
-            "zh_CN.UTF-8",
-            "zh-Hans",
-            "zh_Hans",
-            "zh-Hans-CN",
-            "zh_Hans_CN",
-            "cn",
-            "chinese",
-            "中文",
-        ]),
-    ])
-    .map(|value| Language::parse(&value).expect("validated by clap possible values"))
+    NonEmptyStringValueParser::new().try_map(|value| {
+        Language::parse(&value).ok_or_else(|| format!("unsupported locale: {value}"))
+    })
 }
 
 fn possible_value(name: &'static str, language: Language, help_key: &str) -> PossibleValue {
@@ -574,5 +555,24 @@ mod tests {
         let cli = Cli::parse_from(["fastsync", "--lang", "zh_CN.UTF-8", "src", "dst"]);
 
         assert_eq!(cli.language, Language::ZhCn);
+    }
+
+    #[test]
+    fn supports_c_locale_alias_for_language_flag() {
+        let cli = Cli::parse_from(["fastsync", "--lang", "C", "src", "dst"]);
+
+        assert_eq!(cli.language, Language::En);
+    }
+
+    #[test]
+    fn supports_additional_locale_aliases_for_language_flag() {
+        let cli = Cli::parse_from(["fastsync", "--lang", "zh-Hans-CN", "src", "dst"]);
+        assert_eq!(cli.language, Language::ZhCn);
+
+        let cli = Cli::parse_from(["fastsync", "--lang=zh_Hans_CN", "src", "dst"]);
+        assert_eq!(cli.language, Language::ZhCn);
+
+        let cli = Cli::parse_from(["fastsync", "--lang", "en-GB", "src", "dst"]);
+        assert_eq!(cli.language, Language::En);
     }
 }

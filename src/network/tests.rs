@@ -499,6 +499,43 @@ fn connect_shortcuts_parse_to_push_with_delete() {
 }
 
 #[test]
+fn network_language_flag_accepts_common_locale_aliases() {
+    let command = NetworkCommand::parse_from(
+        vec![
+            OsString::from("fastsync"),
+            OsString::from("share"),
+            OsString::from("/tmp/inbox"),
+            OsString::from("--lang"),
+            OsString::from("zh_Hans_CN.UTF-8"),
+        ],
+        Language::DEFAULT,
+    );
+
+    let NetworkCommand::Share(config) = command else {
+        panic!("expected share command");
+    };
+
+    assert_eq!(config.language, Language::ZhCn);
+
+    let command = NetworkCommand::parse_from(
+        vec![
+            OsString::from("fastsync"),
+            OsString::from("connect"),
+            OsString::from("example.com"),
+            OsString::from("/tmp/project"),
+            OsString::from("--lang=C"),
+        ],
+        Language::ZhCn,
+    );
+
+    let NetworkCommand::Connect(config) = command else {
+        panic!("expected connect command");
+    };
+
+    assert_eq!(config.language, Language::En);
+}
+
+#[test]
 fn short_mode_values_are_accepted() {
     let command = NetworkCommand::parse_from(
         vec![
