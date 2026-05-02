@@ -2,6 +2,7 @@ use std::process::{Command, Output};
 
 fn fastsync(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_fastsync"))
+        .env("FASTSYNC_LANG", "en")
         .args(args)
         .output()
         .expect("fastsync binary should run")

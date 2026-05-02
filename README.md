@@ -255,7 +255,7 @@ Technical note: one-shot network sync uses QUIC with a temporary self-signed cer
 > [!IMPORTANT]
 > Fast mode can miss content changes when size, modified time, and supported permissions stay the same. Use `strict` for important data that needs content confirmation even when metadata matches.
 
-Same-name file metadata synchronization is separate from content comparison and is enabled by default. Use `--no-sync-metadata` to skip standalone metadata updates, or `--preserve-times false` and/or `--preserve-permissions false` to narrow which metadata is preserved.
+Same-name file metadata synchronization is separate from content comparison and is enabled by default. It applies source metadata to matching target files. Use `--no-sync-metadata` to skip standalone metadata updates, or `--preserve-times false` and/or `--preserve-permissions false` to narrow which source metadata is applied to the target.
 
 ## ✅ Verification
 
@@ -308,8 +308,8 @@ visual status layer and does not change sync behavior.
 | `--strict`                                   | Use strict BLAKE3 confirmation for same-size existing files.              |
 | `-c`, `--compare <fast\|strict>`             | Select the comparison strategy.                                           |
 | `--no-sync-metadata`                         | Do not update metadata for same-name files whose content already matches. |
-| `--preserve-times <auto\|true\|false>`       | Control timestamp synchronization.                                        |
-| `--preserve-permissions <auto\|true\|false>` | Control permission synchronization.                                       |
+| `--preserve-times <auto\|true\|false>`       | Apply source modification times to target files.                          |
+| `--preserve-permissions <auto\|true\|false>` | Apply source permission bits to target files.                             |
 | `--verify <none\|changed\|all>`              | Select post-copy verification.                                            |
 | `-t`, `--threads <N\|auto>`                  | Set the worker count.                                                     |
 | `-q`, `--queue-size <N>`                     | Set the bounded task queue size.                                          |

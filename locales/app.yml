@@ -43,11 +43,11 @@ cli.no_sync_metadata:
   en: "Disable separate metadata synchronization for same-name files with identical content."
   zh-CN: "禁用同名且内容相同文件的独立元数据同步。"
 cli.preserve_times:
-  en: "Whether to preserve modification times."
-  zh-CN: "是否保留修改时间。"
+  en: "Apply source modification times to target files."
+  zh-CN: "将源文件的修改时间同步到目标文件。"
 cli.preserve_permissions:
-  en: "Whether to preserve basic permission bits."
-  zh-CN: "是否保留基础权限位。"
+  en: "Apply source basic permission bits to target files."
+  zh-CN: "将源文件的基础权限位同步到目标文件。"
 cli.no_atomic_write:
   en: "Disable temporary-file plus rename writes for target file replacement."
   zh-CN: "禁用临时文件 + 重命名写入目标文件。"
@@ -108,14 +108,14 @@ value.verify.all:
   en: "Verify all regular files in the source after synchronization."
   zh-CN: "校验源目录中所有普通文件。"
 value.preserve.auto:
-  en: "Preserve according to platform capability."
-  zh-CN: "按平台能力自动保留。"
+  en: "Apply source metadata to the target according to platform capability."
+  zh-CN: "按平台能力将源端元数据应用到目标端。"
 value.preserve.true:
-  en: "Always preserve."
-  zh-CN: "强制保留。"
+  en: "Always apply source metadata to the target."
+  zh-CN: "始终将源端元数据应用到目标端。"
 value.preserve.false:
-  en: "Do not preserve."
-  zh-CN: "不保留。"
+  en: "Do not apply source metadata to the target."
+  zh-CN: "不将源端元数据应用到目标端。"
 value.hash.blake3:
   en: "BLAKE3, the default strong verification algorithm."
   zh-CN: "BLAKE3，默认强校验算法。"

@@ -296,8 +296,8 @@ fastsync <source> <target> [options]
 | `--compare <auto              | metadata   | hash>`                                                     | `auto`                                                  | `auto` 表示先比较元数据，再按策略对疑似变化文件做哈希确认。 |
 | `--hash <blake3               | sha256     | xxhash>`                                                   | `blake3`                                                | 当需要内容校验时使用的哈希算法。默认推荐 BLAKE3。           |
 | `--verify <none               | changed    | all>`                                                      | `changed`                                               | 复制完成后的验证强度。默认只验证发生变化的文件。            |
-| `--preserve-times <true       | false      | auto>`                                                     | `auto`                                                  | 自动按平台能力决定是否保留时间戳。                          |
-| `--preserve-permissions <true | false      | auto>`                                                     | `auto`                                                  | 自动按平台能力决定是否保留权限位。                          |
+| `--preserve-times <true       | false      | auto>`                                                     | `auto`                                                  | 自动按平台能力决定是否将源端时间戳应用到目标端。            |
+| `--preserve-permissions <true | false      | auto>`                                                     | `auto`                                                  | 自动按平台能力决定是否将源端权限位应用到目标端。            |
 | `--atomic-write <true         | false>`    | `true`                                                     | 是否使用“临时文件 + 原子重命名”写入目标。建议默认开启。 |
 
 #### 性能与范围控制

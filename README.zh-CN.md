@@ -255,7 +255,7 @@ fastsync c server.example.com ./project -u -d -c 123456
 > [!IMPORTANT]
 > 快速模式可能漏掉“内容变化但大小、修改时间和支持的权限都未变化”的文件。重要数据如果需要元数据一致时也确认内容，请使用 `strict`。
 
-同名文件的元数据同步与内容比较策略相互独立，并且默认开启。可以用 `--no-sync-metadata` 跳过内容已相同文件的独立元数据更新，或用 `--preserve-times false` 和/或 `--preserve-permissions false` 缩小保留范围。
+同名文件的元数据同步与内容比较策略相互独立，并且默认开启；它会把源端元数据应用到匹配的目标文件。可以用 `--no-sync-metadata` 跳过内容已相同文件的独立元数据更新，或用 `--preserve-times false` 和/或 `--preserve-permissions false` 缩小同步到目标端的源端元数据范围。
 
 ## ✅ 校验策略
 
@@ -304,8 +304,8 @@ stderr，因此脚本可以安全读取 stdout。
 | `--strict`                                   | 对同大小的已有文件使用严格 BLAKE3 内容确认。 |
 | `-c`, `--compare <fast\|strict>`             | 选择比较策略。                               |
 | `--no-sync-metadata`                         | 不更新内容已相同的同名文件元数据。           |
-| `--preserve-times <auto\|true\|false>`       | 控制时间戳同步。                             |
-| `--preserve-permissions <auto\|true\|false>` | 控制权限同步。                               |
+| `--preserve-times <auto\|true\|false>`       | 将源文件修改时间同步到目标文件。             |
+| `--preserve-permissions <auto\|true\|false>` | 将源文件权限位同步到目标文件。               |
 | `--verify <none\|changed\|all>`              | 选择复制后校验策略。                         |
 | `-t`, `--threads <N\|auto>`                  | 设置 worker 线程数。                         |
 | `-q`, `--queue-size <N>`                     | 设置有界任务队列长度。                       |
