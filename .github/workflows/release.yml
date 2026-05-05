@@ -196,3 +196,16 @@ jobs:
           generate_release_notes: true
           overwrite_files: true
           token: ${{ github.token }}
+
+  winget:
+    name: Publish to WinGet
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: ShouChenICU.FastSync
+          installers-regex: 'pc-windows-msvc\.exe$'
+          max-versions-to-keep: 7
+          fork-user: ShouChenICU
+          token: ${{ secrets.WINGET_TOKEN }}
