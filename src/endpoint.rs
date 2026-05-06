@@ -7,9 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::SyncConfig;
 use crate::error::{FastSyncError, Result, io_context};
+use crate::filter::PathFilter;
 use crate::hash::{Blake3Digest, blake3_reader};
 use crate::i18n::{tr_path, tr_source_target};
-use crate::scan::{FileEntry, Snapshot, scan_directory, scan_optional_directory};
+use crate::scan::{
+    FileEntry, Snapshot, scan_directory, scan_directory_filtered, scan_optional_directory,
+    scan_optional_directory_filtered,
+};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -24,8 +28,26 @@ pub trait SyncEndpoint: Send + Sync {
     /// 扫描必须存在的目录，通常用于源端。
     fn scan_required(&self, follow_symlinks: bool) -> Result<Snapshot>;
 
+    /// 按过滤规则扫描必须存在的目录。
+    fn scan_required_filtered(
+        &self,
+        follow_symlinks: bool,
+        filter: &PathFilter,
+    ) -> Result<Snapshot> {
+        Ok(self.scan_required(follow_symlinks)?.filtered(filter))
+    }
+
     /// 扫描可以不存在的目录，通常用于目标端。
     fn scan_optional(&self, follow_symlinks: bool) -> Result<Snapshot>;
+
+    /// 按过滤规则扫描可以不存在的目录。
+    fn scan_optional_filtered(
+        &self,
+        follow_symlinks: bool,
+        filter: &PathFilter,
+    ) -> Result<Snapshot> {
+        Ok(self.scan_optional(follow_symlinks)?.filtered(filter))
+    }
 
     /// 确保端点根目录存在。
     fn ensure_root(&self) -> Result<()>;
@@ -131,8 +153,24 @@ impl SyncEndpoint for LocalEndpoint {
         scan_directory(&self.root, follow_symlinks)
     }
 
+    fn scan_required_filtered(
+        &self,
+        follow_symlinks: bool,
+        filter: &PathFilter,
+    ) -> Result<Snapshot> {
+        scan_directory_filtered(&self.root, follow_symlinks, filter)
+    }
+
     fn scan_optional(&self, follow_symlinks: bool) -> Result<Snapshot> {
         scan_optional_directory(&self.root, follow_symlinks)
+    }
+
+    fn scan_optional_filtered(
+        &self,
+        follow_symlinks: bool,
+        filter: &PathFilter,
+    ) -> Result<Snapshot> {
+        scan_optional_directory_filtered(&self.root, follow_symlinks, filter)
     }
 
     fn ensure_root(&self) -> Result<()> {
@@ -273,9 +311,27 @@ impl SyncEndpoints {
         self.source.scan_required(follow_symlinks)
     }
 
+    /// 按过滤规则扫描源端目录。
+    pub fn scan_source_filtered(
+        &self,
+        follow_symlinks: bool,
+        filter: &PathFilter,
+    ) -> Result<Snapshot> {
+        self.source.scan_required_filtered(follow_symlinks, filter)
+    }
+
     /// 扫描目标端目录。
     pub fn scan_target(&self, follow_symlinks: bool) -> Result<Snapshot> {
         self.target.scan_optional(follow_symlinks)
+    }
+
+    /// 按过滤规则扫描目标端目录。
+    pub fn scan_target_filtered(
+        &self,
+        follow_symlinks: bool,
+        filter: &PathFilter,
+    ) -> Result<Snapshot> {
+        self.target.scan_optional_filtered(follow_symlinks, filter)
     }
 
     /// 比较源端和目标端两个快照条目的内容。

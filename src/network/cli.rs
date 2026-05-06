@@ -8,6 +8,7 @@ use clap::builder::{
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use serde::{Deserialize, Serialize};
 
+use crate::filter::{FilterConfig, FilterMode, PathFilter};
 use crate::i18n::{Language, set_language, tr};
 
 use super::{MAX_NETWORK_FILE_CONCURRENCY, ShareMode, protocol::TransferOptions};
@@ -56,6 +57,7 @@ pub struct ShareConfig {
     pub bind: SocketAddr,
     pub mode: ShareMode,
     pub allow_delete: bool,
+    pub filter: PathFilter,
     pub code: Option<String>,
     pub max_failures: u8,
     pub language: Language,
@@ -73,6 +75,7 @@ pub struct ConnectConfig {
     pub preserve_times: bool,
     pub preserve_permissions: bool,
     pub network_concurrency: usize,
+    pub filter: PathFilter,
     pub code: Option<String>,
     pub language: Language,
     pub log_level: crate::config::LogLevel,
@@ -124,6 +127,7 @@ impl ShareConfig {
                 .expect("defaulted by clap"),
             mode: share_mode_from_matches(matches),
             allow_delete: matches.get_flag("allow_delete"),
+            filter: filter_from_matches(matches),
             code: matches.get_one::<String>("code").cloned(),
             max_failures: *matches
                 .get_one::<u8>("max_failures")
@@ -157,6 +161,7 @@ impl ConnectConfig {
             network_concurrency: *matches
                 .get_one::<usize>("network_concurrency")
                 .expect("defaulted by clap"),
+            filter: filter_from_matches(matches),
             code: matches.get_one::<String>("code").cloned(),
             language: *matches
                 .get_one::<Language>("language")
@@ -255,6 +260,22 @@ fn network_command(language: Language) -> Command {
                         .default_value("5")
                         .help(tr(language, "network.share.max_failures")),
                 )
+                .arg(filter_arg(
+                    "exclude_from",
+                    'x',
+                    "exclude-from",
+                    FilterMode::Exclude,
+                    "network.share.exclude_from",
+                    language,
+                ))
+                .arg(filter_arg(
+                    "include_from",
+                    'i',
+                    "include-from",
+                    FilterMode::Include,
+                    "network.share.include_from",
+                    language,
+                ))
                 .arg(log_level_arg(language))
                 .arg(language_arg(language))
                 .arg(help_arg(language)),
@@ -350,10 +371,31 @@ fn network_command(language: Language) -> Command {
                         .default_value("4")
                         .help(tr(language, "network.connect.network_concurrency")),
                 )
+                .arg(filter_arg(
+                    "exclude_from",
+                    'x',
+                    "exclude-from",
+                    FilterMode::Exclude,
+                    "network.connect.exclude_from",
+                    language,
+                ))
+                .arg(filter_arg(
+                    "include_from",
+                    'i',
+                    "include-from",
+                    FilterMode::Include,
+                    "network.connect.include_from",
+                    language,
+                ))
                 .arg(log_level_arg(language))
                 .arg(language_arg(language))
                 .arg(help_arg(language)),
         )
+}
+
+#[cfg(test)]
+pub(super) fn network_command_for_test(language: Language) -> Command {
+    network_command(language)
 }
 
 fn network_concurrency_parser() -> impl TypedValueParser<Value = usize> + 'static {
@@ -368,6 +410,47 @@ fn network_concurrency_parser() -> impl TypedValueParser<Value = usize> + 'stati
                 "network concurrency must be between 1 and {MAX_NETWORK_FILE_CONCURRENCY}"
             ))
         }
+    })
+}
+
+fn filter_arg(
+    id: &'static str,
+    short: char,
+    long: &'static str,
+    mode: FilterMode,
+    help_key: &str,
+    language: Language,
+) -> Arg {
+    let conflicts_with = if id == "exclude_from" {
+        "include_from"
+    } else {
+        "exclude_from"
+    };
+
+    Arg::new(id)
+        .short(short)
+        .long(long)
+        .value_name("FILE")
+        .value_parser(filter_parser(mode))
+        .conflicts_with(conflicts_with)
+        .help(tr(language, help_key))
+}
+
+fn filter_from_matches(matches: &ArgMatches) -> PathFilter {
+    matches
+        .get_one::<PathFilter>("exclude_from")
+        .or_else(|| matches.get_one::<PathFilter>("include_from"))
+        .cloned()
+        .unwrap_or_else(PathFilter::disabled)
+}
+
+fn filter_parser(mode: FilterMode) -> impl TypedValueParser<Value = PathFilter> + 'static {
+    NonEmptyStringValueParser::new().try_map(move |value| {
+        let config = FilterConfig {
+            mode,
+            path: PathBuf::from(value),
+        };
+        PathFilter::from_config(Some(&config)).map_err(|error| error.to_string())
     })
 }
 

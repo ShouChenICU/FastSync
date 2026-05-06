@@ -7,6 +7,7 @@ use clap::builder::{
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 
 use crate::config::{CompareMode, HashAlgorithm, LogLevel, OutputMode, PreserveMode, VerifyMode};
+use crate::filter::{FilterConfig, FilterMode};
 use crate::i18n::{Language, set_language, tr};
 
 /// fastsync 命令行参数。
@@ -28,6 +29,9 @@ pub struct Cli {
 
     /// 遍历时跟随符号链接。默认关闭。
     pub follow_symlinks: bool,
+
+    /// 同步路径过滤规则文件。黑名单保护匹配路径，白名单限制同步作用域。
+    pub filter: Option<FilterConfig>,
 
     /// 文件比较策略。
     pub compare: CompareMode,
@@ -148,6 +152,26 @@ impl Cli {
                 tr(language, "cli.follow_symlinks"),
                 options,
             ))
+            .arg(
+                Arg::new("exclude_from")
+                    .short('x')
+                    .long("exclude-from")
+                    .value_name("FILE")
+                    .value_parser(value_parser!(PathBuf))
+                    .conflicts_with("include_from")
+                    .help(tr(language, "cli.exclude_from"))
+                    .help_heading(options),
+            )
+            .arg(
+                Arg::new("include_from")
+                    .short('i')
+                    .long("include-from")
+                    .value_name("FILE")
+                    .value_parser(value_parser!(PathBuf))
+                    .conflicts_with("exclude_from")
+                    .help(tr(language, "cli.include_from"))
+                    .help_heading(options),
+            )
             .arg(
                 Arg::new("compare")
                     .short('c')
@@ -334,6 +358,7 @@ impl Cli {
             dry_run: matches.get_flag("dry_run"),
             delete: matches.get_flag("delete"),
             follow_symlinks: matches.get_flag("follow_symlinks"),
+            filter: filter_from_matches(&matches),
             compare: *matches
                 .get_one::<CompareMode>("compare")
                 .expect("defaulted by clap"),
@@ -377,6 +402,7 @@ impl Cli {
             dry_run: false,
             delete: false,
             follow_symlinks: false,
+            filter: None,
             compare: CompareMode::Fast,
             strict: false,
             hash: HashAlgorithm::Blake3,
@@ -417,6 +443,25 @@ fn long_flag(id: &'static str, long: &'static str, help: String, heading: &'stat
         .action(ArgAction::SetTrue)
         .help(help)
         .help_heading(heading)
+}
+
+fn filter_from_matches(matches: &ArgMatches) -> Option<FilterConfig> {
+    matches
+        .get_one::<PathBuf>("exclude_from")
+        .cloned()
+        .map(|path| FilterConfig {
+            mode: FilterMode::Exclude,
+            path,
+        })
+        .or_else(|| {
+            matches
+                .get_one::<PathBuf>("include_from")
+                .cloned()
+                .map(|path| FilterConfig {
+                    mode: FilterMode::Include,
+                    path,
+                })
+        })
 }
 
 fn parse_inline_language(arg: &OsStr) -> Option<Language> {
@@ -574,5 +619,41 @@ mod tests {
 
         let cli = Cli::parse_from(["fastsync", "--lang", "en-GB", "src", "dst"]);
         assert_eq!(cli.language, Language::En);
+    }
+
+    #[test]
+    fn filter_shortcuts_parse_to_expected_modes() {
+        let exclude = Cli::parse_from(["fastsync", "src", "dst", "-x", "ignore.txt"]);
+        assert_eq!(
+            exclude.filter,
+            Some(FilterConfig {
+                mode: FilterMode::Exclude,
+                path: PathBuf::from("ignore.txt"),
+            })
+        );
+
+        let include = Cli::parse_from(["fastsync", "src", "dst", "-i", "include.txt"]);
+        assert_eq!(
+            include.filter,
+            Some(FilterConfig {
+                mode: FilterMode::Include,
+                path: PathBuf::from("include.txt"),
+            })
+        );
+    }
+
+    #[test]
+    fn include_and_exclude_filters_conflict() {
+        let result = Cli::command(Language::En).try_get_matches_from([
+            "fastsync",
+            "src",
+            "dst",
+            "-x",
+            "ignore.txt",
+            "-i",
+            "include.txt",
+        ]);
+
+        assert!(result.is_err());
     }
 }

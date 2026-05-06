@@ -27,6 +27,12 @@ cli.delete:
 cli.follow_symlinks:
   en: "Follow symbolic links during traversal. Disabled by default."
   zh-CN: "遍历时跟随符号链接。默认关闭。"
+cli.exclude_from:
+  en: "Read blacklist rules from FILE. Matching files or directories are ignored and protected from deletion."
+  zh-CN: "从 FILE 读取黑名单规则。匹配的文件或目录会被忽略并保护不被删除。"
+cli.include_from:
+  en: "Read whitelist rules from FILE. Only matching files or directories participate in synchronization."
+  zh-CN: "从 FILE 读取白名单规则。只有匹配的文件或目录参与同步。"
 cli.compare:
   en: "File comparison strategy."
   zh-CN: "文件比较策略。"
@@ -221,6 +227,12 @@ network.share.allow_delete:
 network.share.max_failures:
   en: "Maximum failed pairing attempts before the server exits."
   zh-CN: "服务端退出前允许的最大配对失败次数。"
+network.share.exclude_from:
+  en: "Read server-side blacklist rules from FILE. Matching paths are not shared."
+  zh-CN: "从 FILE 读取服务端黑名单规则。匹配路径不会被共享。"
+network.share.include_from:
+  en: "Read server-side whitelist rules from FILE. Only matching paths are shared."
+  zh-CN: "从 FILE 读取服务端白名单规则。只有匹配路径会被共享。"
 network.share.started:
   en: "fastsync one-shot share started"
   zh-CN: "fastsync 一次性共享已启动"
@@ -260,6 +272,12 @@ network.connect.preserve_permissions:
 network.connect.network_concurrency:
   en: "Maximum concurrent network file streams. Defaults to 4."
   zh-CN: "最大并发网络文件流数量。默认 4。"
+network.connect.exclude_from:
+  en: "Read client-side blacklist rules from FILE. Matching local paths are ignored and protected from deletion."
+  zh-CN: "从 FILE 读取客户端黑名单规则。匹配的本地路径会被忽略并保护不被删除。"
+network.connect.include_from:
+  en: "Read client-side whitelist rules from FILE. Only matching local paths participate in synchronization."
+  zh-CN: "从 FILE 读取客户端白名单规则。只有匹配的本地路径参与同步。"
 network.summary.title:
   en: "network sync complete"
   zh-CN: "网络同步完成"
@@ -440,6 +458,12 @@ error.entry_kind.symlink:
 io.parse_threads:
   en: "failed to parse --threads: %{value}"
   zh-CN: "解析 --threads 失败: %{value}"
+io.read_filter_file:
+  en: "read filter rule file: %{path}"
+  zh-CN: "读取过滤规则文件: %{path}"
+io.parse_filter_rule:
+  en: "parse filter rule at line %{value}"
+  zh-CN: "解析第 %{value} 行过滤规则"
 io.create_target_root:
   en: "create target root directory: %{path}"
   zh-CN: "创建目标根目录: %{path}"

@@ -80,6 +80,18 @@ fastsync -d ./source ./target
 > [!CAUTION]
 > `--delete` 会删除目标端中“源目录不存在”的项目。首次使用删除模式时，请先用 `-n -d` 预览。
 
+跳过缓存、日志或临时文件：
+
+```bash
+fastsync ./source ./target -x .fastsyncignore
+```
+
+只同步清单中写到的内容：
+
+```bash
+fastsync ./source ./target -i sync-list.txt
+```
+
 ## 📦 安装
 
 FastSync 使用 Rust 2024 edition，要求 Rust 1.85 或更新版本。如果使用 `rustup`，建议使用稳定工具链：
@@ -122,16 +134,18 @@ FASTSYNC_LANG=zh-CN fastsync --help
 
 ## 🧭 常见场景
 
-| 目标                       | 命令                                  |
-| -------------------------- | ------------------------------------- |
-| 预览同步                   | `fastsync -n ./source ./target`       |
-| 将一个目录同步到另一个目录 | `fastsync ./source ./target`          |
-| 同步并删除目标端陈旧项目   | `fastsync -d ./source ./target`       |
-| 使用严格比较模式           | `fastsync --strict ./source ./target` |
-| 限制 worker 线程数         | `fastsync -t 4 ./source ./target`     |
-| 为脚本输出 JSON            | `fastsync -o json ./source ./target`  |
-| 临时共享目录               | `fastsync s ./source`                 |
-| 接收共享目录               | `fastsync c host ./target -c 123456`  |
+| 目标                       | 命令                                            |
+| -------------------------- | ----------------------------------------------- |
+| 预览同步                   | `fastsync -n ./source ./target`                 |
+| 将一个目录同步到另一个目录 | `fastsync ./source ./target`                    |
+| 同步并删除目标端陈旧项目   | `fastsync -d ./source ./target`                 |
+| 跳过缓存和临时文件         | `fastsync ./source ./target -x .fastsyncignore` |
+| 只同步指定内容             | `fastsync ./source ./target -i sync-list.txt`   |
+| 使用严格比较模式           | `fastsync --strict ./source ./target`           |
+| 限制 worker 线程数         | `fastsync -t 4 ./source ./target`               |
+| 为脚本输出 JSON            | `fastsync -o json ./source ./target`            |
+| 临时共享目录               | `fastsync s ./source`                           |
+| 接收共享目录               | `fastsync c host ./target -c 123456`            |
 
 交互式文本运行会显示底部进度指示；脚本和 JSON 输出保持干净。详见
 [进度与日志](#-进度与日志)。
@@ -159,6 +173,45 @@ fastsync ./target/release ./cache/release
 默认快速模式会信任完全一致的元数据；只有同大小文件的修改时间或支持的权限不一致时，才会用 BLAKE3 确认内容。
 
 </details>
+
+## 🎯 只同步你关心的内容
+
+有些目录里会混着缓存、日志、本地草稿，或者你只想把其中一小部分同步出去。FastSync 可以从文本文件读取过滤规则：
+
+| 参数                          | 用法                                   |
+| ----------------------------- | -------------------------------------- |
+| `-x`, `--exclude-from <FILE>` | 黑名单：匹配到的文件或目录不参与同步。 |
+| `-i`, `--include-from <FILE>` | 白名单：只同步匹配到的文件或目录。     |
+
+规则文件一行一条规则，空行和 `#` 开头的注释会被忽略。常用写法示例：
+
+```gitignore
+# 跳过构建产物和缓存
+target/
+cache/
+*.tmp
+logs/**/*.log
+```
+
+```bash
+fastsync ./project /mnt/backup/project -x .fastsyncignore
+```
+
+白名单适合“只交付这些内容”的场景：
+
+```gitignore
+dist/
+README.md
+docs/**/*.md
+```
+
+```bash
+fastsync ./project ./release -i sync-list.txt
+```
+
+过滤规则会保护匹配范围之外的内容：它们不会被复制、覆盖、校验、同步元数据，也不会因为 `--delete` 被删除。也就是说，黑名单中的本地缓存会被原样保留；白名单之外的目标端文件也会保持不动。
+
+当前支持常用 gitignore 写法：`*`、`?`、`**`、以 `/` 开头的根路径规则，以及以 `/` 结尾的目录规则。目录规则会包含整棵子树。暂不支持 `!` 反向规则。
 
 ## 🌐 远程同步目录
 
@@ -204,6 +257,8 @@ fastsync c server.example.com ./project -u -c 123456
 | `--strict`               | 无短写            |
 | `--allow-delete`         | `-a`              |
 | `--preserve-permissions` | `-p` 或 `--perms` |
+| `--exclude-from FILE`    | `-x FILE`         |
+| `--include-from FILE`    | `-i FILE`         |
 
 删除多余文件需要显式开启，并且只会影响接收文件的一方：
 
@@ -217,6 +272,8 @@ fastsync c server.example.com ./photos -d -c 123456
 fastsync s ./inbox -r -a
 fastsync c server.example.com ./project -u -d -c 123456
 ```
+
+网络同步也支持 `-x/--exclude-from` 和 `-i/--include-from`。共享方和连接方各自只在本地应用自己的规则，规则不会发给对方，也不会合并成共同清单。比如共享方可以不分享 `private/`，连接方也可以只接收 `photos/`；每一侧的过滤规则都只影响这一侧能发送、请求、写入或删除的路径。
 
 默认会保留接收文件的修改时间。权限位只在显式要求时复制：
 
@@ -238,6 +295,7 @@ fastsync c server.example.com ./project -u -d -c 123456
 | ---------------- | -------------------------------------------------------------------------------------- |
 | 单向同步         | 源目录是权威数据，目标目录跟随源目录。                                                 |
 | 不隐式删除       | 不传 `--delete` 时，目标端额外文件会被保留。                                           |
+| 过滤外内容不动   | 黑名单匹配项和白名单之外的内容不会被复制、覆盖或删除。                                 |
 | 快速内容比较     | 两端已有文件默认信任一致的元数据；同大小但元数据不一致时才用 BLAKE3 确认内容。         |
 | 临时文件覆盖写入 | 覆盖已有文件时，默认先写入临时文件名，再重命名到目标路径，降低中断后留下半文件的风险。 |
 | 新文件直接复制   | 目标端不存在的新文件直接复制，避免不必要的重命名开销。                                 |
@@ -301,6 +359,8 @@ stderr，因此脚本可以安全读取 stdout。
 | -------------------------------------------- | -------------------------------------------- |
 | `-n`, `--dry-run`                            | 只预览，不修改目标目录。                     |
 | `-d`, `--delete`                             | 删除目标端中源目录不存在的项目。             |
+| `-x`, `--exclude-from <FILE>`                | 从规则文件读取黑名单，匹配内容不参与同步。   |
+| `-i`, `--include-from <FILE>`                | 从规则文件读取白名单，只同步匹配内容。       |
 | `--strict`                                   | 对同大小的已有文件使用严格 BLAKE3 内容确认。 |
 | `-c`, `--compare <fast\|strict>`             | 选择比较策略。                               |
 | `--no-sync-metadata`                         | 不更新内容已相同的同名文件元数据。           |

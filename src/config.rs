@@ -4,6 +4,7 @@ use clap::{ValueEnum, builder::PossibleValue};
 
 use crate::cli::Cli;
 use crate::error::{FastSyncError, Result};
+use crate::filter::PathFilter;
 use crate::i18n::{tr_current, tr_value};
 
 /// 文件内容比较策略。
@@ -122,6 +123,7 @@ pub struct SyncConfig {
     pub stop_on_error: bool,
     pub output: OutputMode,
     pub log_level: LogLevel,
+    pub filter: PathFilter,
 }
 
 impl SyncConfig {
@@ -157,6 +159,8 @@ impl TryFrom<Cli> for SyncConfig {
             cli.compare
         };
 
+        let filter = PathFilter::from_config(cli.filter.as_ref())?;
+
         Ok(Self {
             source: cli.source,
             target: cli.target,
@@ -176,6 +180,7 @@ impl TryFrom<Cli> for SyncConfig {
             stop_on_error: cli.stop_on_error,
             output: cli.output,
             log_level: cli.log_level,
+            filter,
         })
     }
 }
@@ -387,6 +392,7 @@ mod tests {
             stop_on_error: false,
             output: OutputMode::Text,
             log_level: LogLevel::Info,
+            filter: PathFilter::disabled(),
         };
 
         assert!(!config.syncs_file_metadata());

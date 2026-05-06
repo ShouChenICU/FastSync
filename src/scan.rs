@@ -6,6 +6,7 @@ use std::time::SystemTime;
 use walkdir::WalkDir;
 
 use crate::error::{FastSyncError, Result, io_context};
+use crate::filter::PathFilter;
 use crate::i18n::tr_path;
 
 /// 扫描到的文件系统对象类型。
@@ -64,6 +65,18 @@ impl Snapshot {
     pub fn get(&self, path: &Path) -> Option<&FileEntry> {
         self.entries.get(path)
     }
+
+    /// 返回只包含过滤器允许条目的新快照。
+    pub fn filtered(&self, filter: &PathFilter) -> Self {
+        let entries = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| filter.allows_entry(&entry.relative_path, entry.is_dir()))
+            .map(|(path, entry)| (path.clone(), entry.clone()))
+            .collect();
+
+        Self { entries }
+    }
 }
 
 /// 扫描必定存在的源目录。
@@ -71,7 +84,19 @@ pub fn scan_directory(root: &Path, follow_symlinks: bool) -> Result<Snapshot> {
     if !root.is_dir() {
         return Err(FastSyncError::InvalidSource(root.to_path_buf()));
     }
-    scan_existing_directory(root, follow_symlinks)
+    scan_existing_directory(root, follow_symlinks, &PathFilter::disabled())
+}
+
+/// 按过滤规则扫描必定存在的源目录。
+pub fn scan_directory_filtered(
+    root: &Path,
+    follow_symlinks: bool,
+    filter: &PathFilter,
+) -> Result<Snapshot> {
+    if !root.is_dir() {
+        return Err(FastSyncError::InvalidSource(root.to_path_buf()));
+    }
+    scan_existing_directory(root, follow_symlinks, filter)
 }
 
 /// 扫描可不存在的目标目录。
@@ -84,17 +109,50 @@ pub fn scan_optional_directory(root: &Path, follow_symlinks: bool) -> Result<Sna
     if !root.is_dir() {
         return Err(FastSyncError::InvalidTarget(root.to_path_buf()));
     }
-    scan_existing_directory(root, follow_symlinks)
+    scan_existing_directory(root, follow_symlinks, &PathFilter::disabled())
 }
 
-fn scan_existing_directory(root: &Path, follow_symlinks: bool) -> Result<Snapshot> {
+/// 按过滤规则扫描可不存在的目标目录。
+pub fn scan_optional_directory_filtered(
+    root: &Path,
+    follow_symlinks: bool,
+    filter: &PathFilter,
+) -> Result<Snapshot> {
+    if !root.exists() {
+        return Ok(Snapshot::default());
+    }
+    if !root.is_dir() {
+        return Err(FastSyncError::InvalidTarget(root.to_path_buf()));
+    }
+    scan_existing_directory(root, follow_symlinks, filter)
+}
+
+fn scan_existing_directory(
+    root: &Path,
+    follow_symlinks: bool,
+    filter: &PathFilter,
+) -> Result<Snapshot> {
     let mut snapshot = Snapshot::default();
 
-    for entry in WalkDir::new(root)
+    let iter = WalkDir::new(root)
         .follow_links(follow_symlinks)
         .min_depth(1)
         .into_iter()
-    {
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            let Ok(relative_path) = entry.path().strip_prefix(root) else {
+                return false;
+            };
+            if entry.file_type().is_dir() {
+                filter.should_descend(relative_path)
+            } else {
+                true
+            }
+        });
+
+    for entry in iter {
         let entry = entry?;
         let absolute_path = entry.path().to_path_buf();
         let relative_path = absolute_path
@@ -124,6 +182,10 @@ fn scan_existing_directory(root: &Path, follow_symlinks: bool) -> Result<Snapsho
         } else {
             return Err(FastSyncError::UnsupportedEntry(relative_path));
         };
+
+        if !filter.allows_entry(&relative_path, kind == EntryKind::Directory) {
+            continue;
+        }
 
         let modified = metadata.modified().ok();
         let readonly = metadata.permissions().readonly();
@@ -191,6 +253,46 @@ mod tests {
                 .get(Path::new("nested/a.txt"))
                 .is_some_and(FileEntry::is_file)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn filtered_scan_prunes_excluded_directory_subtree()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        fs::create_dir(root.path().join("cache"))?;
+        fs::write(root.path().join("cache").join("tmp.bin"), "tmp")?;
+        fs::write(root.path().join("keep.txt"), "keep")?;
+        let filter =
+            crate::filter::PathFilter::from_rules(crate::filter::FilterMode::Exclude, "cache/\n")?;
+
+        let snapshot = scan_directory_filtered(root.path(), false, &filter)?;
+
+        assert!(snapshot.get(Path::new("keep.txt")).is_some());
+        assert!(snapshot.get(Path::new("cache")).is_none());
+        assert!(snapshot.get(Path::new("cache/tmp.bin")).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn filtered_scan_descends_through_unmatched_include_ancestors()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        fs::create_dir(root.path().join("src"))?;
+        fs::create_dir(root.path().join("src").join("bin"))?;
+        fs::write(root.path().join("src").join("bin").join("main.rs"), "main")?;
+        fs::write(root.path().join("src").join("bin").join("main.txt"), "main")?;
+        let filter = crate::filter::PathFilter::from_rules(
+            crate::filter::FilterMode::Include,
+            "src/**/*.rs\n",
+        )?;
+
+        let snapshot = scan_directory_filtered(root.path(), false, &filter)?;
+
+        assert!(snapshot.get(Path::new("src")).is_none());
+        assert!(snapshot.get(Path::new("src/bin")).is_none());
+        assert!(snapshot.get(Path::new("src/bin/main.rs")).is_some());
+        assert!(snapshot.get(Path::new("src/bin/main.txt")).is_none());
         Ok(())
     }
 

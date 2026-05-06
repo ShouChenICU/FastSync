@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use quinn::Endpoint;
 
+use crate::filter::{FilterMode, PathFilter};
 use crate::i18n::Language;
 
 use super::{
@@ -71,6 +72,7 @@ fn share_config(root: &Path, mode: ShareMode, allow_delete: bool) -> ShareConfig
             .expect("test bind address should parse"),
         mode,
         allow_delete,
+        filter: PathFilter::disabled(),
         code: Some("123456".to_string()),
         max_failures: 1,
         language: Language::DEFAULT,
@@ -499,6 +501,77 @@ fn connect_shortcuts_parse_to_push_with_delete() {
 }
 
 #[test]
+fn network_filter_shortcuts_parse_for_share_and_connect()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let rules = tempfile::NamedTempFile::new()?;
+    std::fs::write(rules.path(), "*.tmp\n")?;
+
+    let share = NetworkCommand::parse_from(
+        vec![
+            OsString::from("fastsync"),
+            OsString::from("share"),
+            OsString::from("/tmp/inbox"),
+            OsString::from("-x"),
+            rules.path().as_os_str().to_os_string(),
+        ],
+        Language::DEFAULT,
+    );
+    let NetworkCommand::Share(share_config) = share else {
+        panic!("expected share command");
+    };
+    assert!(
+        !share_config
+            .filter
+            .allows_entry(Path::new("cache.tmp"), false)
+    );
+
+    let connect = NetworkCommand::parse_from(
+        vec![
+            OsString::from("fastsync"),
+            OsString::from("connect"),
+            OsString::from("example.com"),
+            OsString::from("/tmp/project"),
+            OsString::from("-i"),
+            rules.path().as_os_str().to_os_string(),
+        ],
+        Language::DEFAULT,
+    );
+    let NetworkCommand::Connect(connect_config) = connect else {
+        panic!("expected connect command");
+    };
+    assert!(
+        connect_config
+            .filter
+            .allows_entry(Path::new("cache.tmp"), false)
+    );
+    assert!(
+        !connect_config
+            .filter
+            .allows_entry(Path::new("cache.log"), false)
+    );
+    Ok(())
+}
+
+#[test]
+fn network_filter_options_conflict() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let exclude = tempfile::NamedTempFile::new()?;
+    let include = tempfile::NamedTempFile::new()?;
+    let result = super::cli::network_command_for_test(Language::En).try_get_matches_from([
+        OsString::from("fastsync"),
+        OsString::from("connect"),
+        OsString::from("example.com"),
+        OsString::from("/tmp/project"),
+        OsString::from("-x"),
+        exclude.path().as_os_str().to_os_string(),
+        OsString::from("-i"),
+        include.path().as_os_str().to_os_string(),
+    ]);
+
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
 fn network_language_flag_accepts_common_locale_aliases() {
     let command = NetworkCommand::parse_from(
         vec![
@@ -573,6 +646,7 @@ fn network_session_rejects_missing_share_root_before_accepting_connections()
         bind: "127.0.0.1:0".parse()?,
         mode: ShareMode::Send,
         allow_delete: false,
+        filter: PathFilter::disabled(),
         code: Some("123456".to_string()),
         max_failures: 1,
         language: Language::DEFAULT,
@@ -598,6 +672,7 @@ fn network_session_rejects_invalid_endpoint_port_before_connecting()
         preserve_times: true,
         preserve_permissions: false,
         network_concurrency: 4,
+        filter: PathFilter::disabled(),
         code: Some("123456".to_string()),
         language: Language::DEFAULT,
         log_level: crate::config::LogLevel::Error,
@@ -674,6 +749,55 @@ fn request_files_includes_missing_and_changed_files()
     assert!(requested.contains(&PathBuf::from("changed.txt")));
     assert!(requested.contains(&PathBuf::from("missing.txt")));
     assert_eq!(requested.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn filtered_manifest_omits_sender_excluded_subtrees()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    std::fs::write(source.path().join("keep.txt"), "keep")?;
+    std::fs::create_dir(source.path().join("cache"))?;
+    std::fs::write(source.path().join("cache").join("tmp.bin"), "tmp")?;
+    let filter = PathFilter::from_rules(FilterMode::Exclude, "cache/\n")?;
+
+    let manifest = build_manifest_filtered(source.path(), &filter)?;
+
+    assert!(
+        manifest
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("keep.txt"))
+    );
+    assert!(
+        !manifest
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("cache/tmp.bin"))
+    );
+    Ok(())
+}
+
+#[test]
+fn receiver_include_filter_requests_only_allowed_files()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let source = tempfile::tempdir()?;
+    let target = tempfile::tempdir()?;
+    std::fs::write(source.path().join("keep.txt"), "keep")?;
+    std::fs::write(source.path().join("skip.txt"), "skip")?;
+    let manifest = build_manifest(source.path())?;
+    let remote_hashes = manifest_hashes(source.path(), &manifest)?;
+    let filter = PathFilter::from_rules(FilterMode::Include, "keep.txt\n")?;
+
+    let requested = request_files_for_local_state_filtered(
+        target.path(),
+        &manifest,
+        false,
+        &remote_hashes,
+        &filter,
+    )?;
+
+    assert_eq!(requested, vec![PathBuf::from("keep.txt")]);
     Ok(())
 }
 
@@ -827,6 +951,40 @@ fn delete_obsolete_removes_files_and_nested_directories()
     assert!(!stale_dir.exists());
     assert!(!root.path().join("stale.txt").exists());
     assert!(root.path().join("keep.txt").exists());
+    Ok(())
+}
+
+#[test]
+fn delete_obsolete_respects_receiver_filter_scope()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("keep.txt"), "keep")?;
+    std::fs::write(root.path().join("outside.txt"), "outside")?;
+    std::fs::create_dir(root.path().join("cache"))?;
+    std::fs::write(root.path().join("cache").join("local.bin"), "local")?;
+    let manifest = Manifest {
+        dirs: Vec::new(),
+        files: vec![FileManifest {
+            path: PathBuf::from("keep.txt"),
+            len: 4,
+            metadata: WireMetadata::from_entry(
+                crate::scan::scan_directory(root.path(), false)?
+                    .get(Path::new("keep.txt"))
+                    .expect("keep.txt should be scanned"),
+            ),
+        }],
+    };
+    let filter = PathFilter::from_rules(FilterMode::Exclude, "cache/\n")?;
+
+    let deleted = runtime.block_on(delete_obsolete_filtered(root.path(), &manifest, &filter))?;
+
+    assert_eq!(deleted, 1);
+    assert!(!root.path().join("outside.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("cache").join("local.bin"))?,
+        "local"
+    );
     Ok(())
 }
 

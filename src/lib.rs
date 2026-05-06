@@ -10,6 +10,7 @@ pub mod config;
 pub mod endpoint;
 pub mod error;
 pub mod executor;
+pub mod filter;
 pub mod hash;
 pub mod i18n;
 pub mod network;
@@ -80,7 +81,7 @@ pub fn run_sync_with_endpoints_progress(
 
     let phase_started = Instant::now();
     let scan_source_progress = progress.spinner("progress.scan_source");
-    let source_snapshot = endpoints.scan_source(config.follow_symlinks)?;
+    let source_snapshot = endpoints.scan_source_filtered(config.follow_symlinks, &config.filter)?;
     scan_source_progress.finish();
     info!(
         phase = "scan_source",
@@ -90,7 +91,7 @@ pub fn run_sync_with_endpoints_progress(
     );
     let phase_started = Instant::now();
     let scan_target_progress = progress.spinner("progress.scan_target");
-    let target_snapshot = endpoints.scan_target(config.follow_symlinks)?;
+    let target_snapshot = endpoints.scan_target_filtered(config.follow_symlinks, &config.filter)?;
     scan_target_progress.finish();
     info!(
         phase = "scan_target",
@@ -208,6 +209,67 @@ mod tests {
         assert!(!target.path().join("a.txt").exists());
         assert_eq!(summary.planned_operations, 1);
         assert_eq!(summary.copied_files, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn exclude_filter_protects_matching_target_paths_from_delete()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        fs::write(source.path().join("keep.txt"), "keep")?;
+        fs::write(target.path().join("stale.txt"), "stale")?;
+        fs::create_dir(target.path().join("cache"))?;
+        fs::write(target.path().join("cache").join("local.bin"), "local")?;
+        let rules = source.path().join("rules.txt");
+        fs::write(&rules, "cache/\n")?;
+
+        let mut cli = Cli::for_test(source.path(), target.path());
+        cli.delete = true;
+        cli.filter = Some(crate::filter::FilterConfig {
+            mode: crate::filter::FilterMode::Exclude,
+            path: rules,
+        });
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(summary.deleted_files, 1);
+        assert!(!target.path().join("stale.txt").exists());
+        assert_eq!(
+            fs::read_to_string(target.path().join("cache").join("local.bin"))?,
+            "local"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn include_filter_limits_delete_to_whitelisted_scope()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let source = tempdir()?;
+        let target = tempdir()?;
+        fs::write(source.path().join("keep.txt"), "keep")?;
+        fs::write(target.path().join("keep.txt"), "old")?;
+        fs::write(target.path().join("outside.txt"), "outside")?;
+        let rules = source.path().join("rules.txt");
+        fs::write(&rules, "keep.txt\n")?;
+
+        let mut cli = Cli::for_test(source.path(), target.path());
+        cli.delete = true;
+        cli.filter = Some(crate::filter::FilterConfig {
+            mode: crate::filter::FilterMode::Include,
+            path: rules,
+        });
+        let config = SyncConfig::try_from(cli)?;
+
+        let summary = crate::run_sync(config)?;
+
+        assert_eq!(summary.deleted_files, 0);
+        assert_eq!(fs::read_to_string(target.path().join("keep.txt"))?, "keep");
+        assert_eq!(
+            fs::read_to_string(target.path().join("outside.txt"))?,
+            "outside"
+        );
         Ok(())
     }
 

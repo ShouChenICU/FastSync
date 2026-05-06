@@ -8,6 +8,7 @@ use tokio::task::JoinSet;
 use tracing::info;
 
 use crate::error::{FastSyncError, Result};
+use crate::filter::PathFilter;
 use crate::i18n::tr_current;
 use crate::progress::{ProgressPhase, SyncProgress};
 
@@ -38,6 +39,7 @@ pub(super) async fn send_tree(
         send,
         recv,
         options,
+        &PathFilter::disabled(),
         &SyncProgress::new(false),
     )
     .await
@@ -53,11 +55,12 @@ pub(super) async fn send_tree_with_progress(
     send: &mut SendStream,
     recv: &mut RecvStream,
     options: TransferOptions,
+    filter: &PathFilter,
     progress: &SyncProgress,
 ) -> Result<()> {
     let phase_started = Instant::now();
     let manifest_progress = progress.spinner("progress.network_send_manifest");
-    let manifest = send_manifest_with_progress(root, send, &manifest_progress).await?;
+    let manifest = send_manifest_with_progress(root, send, filter, &manifest_progress).await?;
     manifest_progress.finish();
     info!(
         phase = "network_send_manifest",
@@ -118,9 +121,10 @@ pub(super) async fn send_tree_with_progress(
 async fn send_manifest_with_progress(
     root: &Path,
     send: &mut SendStream,
+    filter: &PathFilter,
     progress: &ProgressPhase,
 ) -> Result<Manifest> {
-    let snapshot = crate::scan::scan_directory(root, false)?;
+    let snapshot = crate::scan::scan_directory_filtered(root, false, filter)?;
     let mut manifest = Manifest {
         dirs: Vec::new(),
         files: Vec::new(),
@@ -256,6 +260,7 @@ pub(super) async fn receive_tree(
         recv,
         send,
         options,
+        &PathFilter::disabled(),
         &SyncProgress::new(false),
     )
     .await
@@ -270,11 +275,13 @@ pub(super) async fn receive_tree_with_progress(
     recv: &mut RecvStream,
     send: &mut SendStream,
     options: TransferOptions,
+    filter: &PathFilter,
     progress: &SyncProgress,
 ) -> Result<ReceiveSummary> {
     let phase_started = Instant::now();
     let manifest_progress = progress.spinner("progress.network_receive_manifest");
-    let manifest = receive_manifest_with_progress(root, recv, options, &manifest_progress).await?;
+    let manifest =
+        receive_manifest_with_progress(root, recv, options, filter, &manifest_progress).await?;
     manifest_progress.finish();
     info!(
         phase = "network_receive_manifest",
@@ -295,6 +302,7 @@ pub(super) async fn receive_tree_with_progress(
         root,
         &manifest,
         options.strict,
+        filter,
         send,
         recv,
         &request_progress,
@@ -338,7 +346,8 @@ pub(super) async fn receive_tree_with_progress(
     let deleted = if options.delete {
         let phase_started = Instant::now();
         let delete_progress = progress.spinner("progress.network_delete_obsolete");
-        let deleted = delete_obsolete_with_progress(root, &manifest, &delete_progress).await?;
+        let deleted =
+            delete_obsolete_with_progress(root, &manifest, filter, &delete_progress).await?;
         delete_progress.finish();
         info!(
             phase = "network_delete_obsolete",
@@ -381,6 +390,7 @@ async fn receive_manifest_with_progress(
     root: &Path,
     recv: &mut RecvStream,
     options: TransferOptions,
+    filter: &PathFilter,
     progress: &ProgressPhase,
 ) -> Result<Manifest> {
     match read_message(recv).await? {
@@ -400,6 +410,9 @@ async fn receive_manifest_with_progress(
     loop {
         match read_message(recv).await? {
             WireMessage::ManifestDir(dir) => {
+                if !filter.allows_entry(&dir.path, true) {
+                    continue;
+                }
                 let path = safe_join(root, &dir.path)?;
                 ensure_directory_path(&path, options.delete).await?;
                 tokio::fs::create_dir_all(&path)
@@ -409,6 +422,9 @@ async fn receive_manifest_with_progress(
                 progress.set_manifest_status(manifest.dirs.len(), manifest.files.len(), bytes);
             }
             WireMessage::ManifestFile(file) => {
+                if !filter.allows_entry(&file.path, false) {
+                    continue;
+                }
                 bytes = bytes.saturating_add(file.len);
                 manifest.files.push(file);
                 progress.set_manifest_status(manifest.dirs.len(), manifest.files.len(), bytes);
@@ -433,6 +449,7 @@ pub(super) async fn send_file_requests(
         root,
         manifest,
         strict,
+        &PathFilter::disabled(),
         send,
         recv,
         &ProgressPhase::disabled(),
@@ -448,17 +465,19 @@ async fn send_file_requests_with_progress(
     root: &Path,
     manifest: &Manifest,
     strict: bool,
+    filter: &PathFilter,
     send: &mut SendStream,
     recv: &mut RecvStream,
     progress: &ProgressPhase,
 ) -> Result<Vec<PathBuf>> {
-    let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
+    let target_snapshot = match crate::scan::scan_optional_directory_filtered(root, false, filter) {
         Ok(snapshot) => snapshot,
         Err(FastSyncError::InvalidTarget(path)) if path == root => {
             write_message(send, &WireMessage::HashRequestEnd).await?;
             let requested: Vec<_> = manifest
                 .files
                 .iter()
+                .filter(|file| filter.allows_entry(&file.path, false))
                 .map(|file| file.path.clone())
                 .collect();
             send_requested_file_paths(requested.iter().cloned(), send).await?;
@@ -473,6 +492,11 @@ async fn send_file_requests_with_progress(
     let mut direct_requests = 0_usize;
     let mut hash_comparisons = Vec::new();
     for file in &manifest.files {
+        if !filter.allows_entry(&file.path, false) {
+            progress.inc(1);
+            progress.set_request_status(hash_comparisons.len(), requested.len());
+            continue;
+        }
         match file_request_decision(&target_snapshot, file, strict)? {
             FileRequestDecision::Request => {
                 requested.push(file.path.clone());
@@ -595,12 +619,30 @@ pub(super) fn request_files_for_local_state(
     strict: bool,
     remote_hashes: &HashMap<PathBuf, String>,
 ) -> Result<Vec<PathBuf>> {
-    let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
+    request_files_for_local_state_filtered(
+        root,
+        manifest,
+        strict,
+        remote_hashes,
+        &PathFilter::disabled(),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn request_files_for_local_state_filtered(
+    root: &Path,
+    manifest: &Manifest,
+    strict: bool,
+    remote_hashes: &HashMap<PathBuf, String>,
+    filter: &PathFilter,
+) -> Result<Vec<PathBuf>> {
+    let target_snapshot = match crate::scan::scan_optional_directory_filtered(root, false, filter) {
         Ok(snapshot) => snapshot,
         Err(FastSyncError::InvalidTarget(path)) if path == root => {
             return Ok(manifest
                 .files
                 .iter()
+                .filter(|file| filter.allows_entry(&file.path, false))
                 .map(|file| file.path.clone())
                 .collect());
         }
@@ -609,6 +651,9 @@ pub(super) fn request_files_for_local_state(
 
     let mut requested = Vec::new();
     for file in &manifest.files {
+        if !filter.allows_entry(&file.path, false) {
+            continue;
+        }
         match file_request_decision(&target_snapshot, file, strict)? {
             FileRequestDecision::Request => requested.push(file.path.clone()),
             FileRequestDecision::Skip => {}
@@ -700,7 +745,12 @@ pub(super) fn metadata_permissions_match(
 
 #[cfg(test)]
 pub(super) fn build_manifest(root: &Path) -> Result<Manifest> {
-    let snapshot = crate::scan::scan_directory(root, false)?;
+    build_manifest_filtered(root, &PathFilter::disabled())
+}
+
+#[cfg(test)]
+pub(super) fn build_manifest_filtered(root: &Path, filter: &PathFilter) -> Result<Manifest> {
+    let snapshot = crate::scan::scan_directory_filtered(root, false, filter)?;
     let mut dirs = Vec::new();
     let mut files = Vec::new();
 
@@ -1077,16 +1127,32 @@ pub(super) async fn ensure_file_path(path: &Path, delete_enabled: bool) -> Resul
 
 #[cfg(test)]
 pub(super) async fn delete_obsolete(root: &Path, manifest: &Manifest) -> Result<usize> {
-    delete_obsolete_with_progress(root, manifest, &ProgressPhase::disabled()).await
+    delete_obsolete_with_progress(
+        root,
+        manifest,
+        &PathFilter::disabled(),
+        &ProgressPhase::disabled(),
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(super) async fn delete_obsolete_filtered(
+    root: &Path,
+    manifest: &Manifest,
+    filter: &PathFilter,
+) -> Result<usize> {
+    delete_obsolete_with_progress(root, manifest, filter, &ProgressPhase::disabled()).await
 }
 
 /// 删除目标端中 manifest 不再包含的陈旧项，并展示已删除数量。
 async fn delete_obsolete_with_progress(
     root: &Path,
     manifest: &Manifest,
+    filter: &PathFilter,
     progress: &ProgressPhase,
 ) -> Result<usize> {
-    let target_snapshot = match crate::scan::scan_optional_directory(root, false) {
+    let target_snapshot = match crate::scan::scan_optional_directory_filtered(root, false, filter) {
         Ok(snapshot) => snapshot,
         Err(FastSyncError::InvalidTarget(path)) if path == root => return Ok(0),
         Err(error) => return Err(error),

@@ -80,6 +80,18 @@ fastsync -d ./source ./target
 > [!CAUTION]
 > `--delete` removes files from the target when they do not exist in the source. Preview with `-n -d` before the first real deletion run.
 
+Skip caches, logs, or temporary files:
+
+```bash
+fastsync ./source ./target -x .fastsyncignore
+```
+
+Sync only the paths listed in a file:
+
+```bash
+fastsync ./source ./target -i sync-list.txt
+```
+
 ## 📦 Install
 
 FastSync uses the Rust 2024 edition and requires Rust 1.85 or newer. With `rustup`, use the stable toolchain:
@@ -122,16 +134,18 @@ FASTSYNC_LANG=zh-CN fastsync --help
 
 ## 🧭 Common Workflows
 
-| Goal                               | Command                               |
-| ---------------------------------- | ------------------------------------- |
-| Preview a sync                     | `fastsync -n ./source ./target`       |
-| Sync one folder into another       | `fastsync ./source ./target`          |
-| Sync and delete stale target files | `fastsync -d ./source ./target`       |
-| Use strict comparison              | `fastsync --strict ./source ./target` |
-| Limit worker threads               | `fastsync -t 4 ./source ./target`     |
-| Output JSON for scripts            | `fastsync -o json ./source ./target`  |
-| Share a folder once                | `fastsync s ./source`                 |
-| Receive a shared folder            | `fastsync c host ./target -c 123456`  |
+| Goal                               | Command                                         |
+| ---------------------------------- | ----------------------------------------------- |
+| Preview a sync                     | `fastsync -n ./source ./target`                 |
+| Sync one folder into another       | `fastsync ./source ./target`                    |
+| Sync and delete stale target files | `fastsync -d ./source ./target`                 |
+| Skip caches and temporary files    | `fastsync ./source ./target -x .fastsyncignore` |
+| Sync only selected paths           | `fastsync ./source ./target -i sync-list.txt`   |
+| Use strict comparison              | `fastsync --strict ./source ./target`           |
+| Limit worker threads               | `fastsync -t 4 ./source ./target`               |
+| Output JSON for scripts            | `fastsync -o json ./source ./target`            |
+| Share a folder once                | `fastsync s ./source`                           |
+| Receive a shared folder            | `fastsync c host ./target -c 123456`            |
 
 Interactive text runs show a bottom progress indicator; scripted and JSON runs
 stay clean. See [Progress And Logs](#-progress-and-logs).
@@ -159,6 +173,45 @@ fastsync ./target/release ./cache/release
 The default fast mode trusts matching metadata, then hashes only when same-size files have differing modified times or supported permissions.
 
 </details>
+
+## 🎯 Sync Only What Matters
+
+Real project folders often contain caches, logs, local notes, or generated files. FastSync can read a small rule file to decide what should participate in sync:
+
+| Option                        | Use it for                                                     |
+| ----------------------------- | -------------------------------------------------------------- |
+| `-x`, `--exclude-from <FILE>` | Blacklist mode: matching files or directories are left alone.  |
+| `-i`, `--include-from <FILE>` | Whitelist mode: only matching files or directories are synced. |
+
+Rule files use one rule per line. Empty lines and lines starting with `#` are ignored. A typical blacklist might look like this:
+
+```gitignore
+# Skip build output and local caches
+target/
+cache/
+*.tmp
+logs/**/*.log
+```
+
+```bash
+fastsync ./project /mnt/backup/project -x .fastsyncignore
+```
+
+Whitelist mode is handy when you only want to publish or copy a known slice of a folder:
+
+```gitignore
+dist/
+README.md
+docs/**/*.md
+```
+
+```bash
+fastsync ./project ./release -i sync-list.txt
+```
+
+Filtered-out paths are protected. FastSync will not copy, overwrite, verify, update metadata, or delete them, even when `--delete` is enabled. In other words: excluded local caches stay in place, and files outside an include list are left untouched.
+
+The initial rule set supports common gitignore-style patterns: `*`, `?`, `**`, root-anchored rules that start with `/`, and directory rules that end with `/`. Directory rules include the whole subtree. Negation rules such as `!keep.txt` are not supported yet.
 
 ## 🌐 Remote Folder Sync
 
@@ -204,6 +257,8 @@ Common shortcuts:
 | `--strict`               | no short form     |
 | `--allow-delete`         | `-a`              |
 | `--preserve-permissions` | `-p` or `--perms` |
+| `--exclude-from FILE`    | `-x FILE`         |
+| `--include-from FILE`    | `-i FILE`         |
 
 Deleting extra files is always opt-in and only affects the side receiving files:
 
@@ -217,6 +272,8 @@ fastsync c server.example.com ./photos -d -c 123456
 fastsync s ./inbox -r -a
 fastsync c server.example.com ./project -u -d -c 123456
 ```
+
+Network sync also accepts `-x/--exclude-from` and `-i/--include-from`. Each side applies its own rules locally; rules are not sent to the peer and are not merged into a shared filter. For example, the sharing side can choose not to share `private/`, while the connecting side can choose to receive only `photos/`. Each side's filter only affects the paths that side may send, request, write, or delete.
 
 By default, received files keep their modification times. Permission bits are copied only when requested:
 
@@ -238,6 +295,7 @@ Technical note: one-shot network sync uses QUIC with a temporary self-signed cer
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | One-way sync             | The source is the authority; the target follows it.                                                                                                    |
 | No implicit deletion     | Target-only files are preserved unless `--delete` is used.                                                                                             |
+| Filtered paths stay put  | Excluded paths and paths outside an include list are not copied, overwritten, or deleted.                                                              |
 | Fast comparison          | Existing files trust matching metadata by default, and use BLAKE3 only for same-size files whose metadata differs.                                     |
 | Temporary-file overwrite | Existing targets are written to a temporary filename first, then renamed into place, reducing the chance of leaving a partial file after interruption. |
 | Direct new-file copy     | Missing target files are copied directly, without unnecessary rename overhead.                                                                         |
@@ -305,6 +363,8 @@ visual status layer and does not change sync behavior.
 | -------------------------------------------- | ------------------------------------------------------------------------- |
 | `-n`, `--dry-run`                            | Preview only; do not modify the target.                                   |
 | `-d`, `--delete`                             | Delete target entries that no longer exist in the source.                 |
+| `-x`, `--exclude-from <FILE>`                | Read blacklist rules from a file; matching paths are skipped.             |
+| `-i`, `--include-from <FILE>`                | Read whitelist rules from a file; only matching paths are synced.         |
 | `--strict`                                   | Use strict BLAKE3 confirmation for same-size existing files.              |
 | `-c`, `--compare <fast\|strict>`             | Select the comparison strategy.                                           |
 | `--no-sync-metadata`                         | Do not update metadata for same-name files whose content already matches. |

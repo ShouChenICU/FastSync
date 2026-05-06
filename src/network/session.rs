@@ -245,6 +245,7 @@ pub(super) async fn handle_share_connection_with_progress(
                 &mut send,
                 &mut recv,
                 options,
+                &config.filter,
                 progress,
             )
             .await?;
@@ -277,6 +278,7 @@ pub(super) async fn handle_share_connection_with_progress(
                 &mut recv,
                 &mut send,
                 options,
+                &config.filter,
                 progress,
             )
             .await?;
@@ -384,6 +386,7 @@ pub(super) async fn run_connect_async_progress(
                 &mut recv,
                 &mut send,
                 config.transfer_options(),
+                &config.filter,
                 &progress,
             )
             .await?;
@@ -406,6 +409,7 @@ pub(super) async fn run_connect_async_progress(
                 &mut send,
                 &mut recv,
                 config.transfer_options(),
+                &config.filter,
                 &progress,
             )
             .await?;
