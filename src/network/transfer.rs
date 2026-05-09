@@ -850,11 +850,12 @@ async fn send_requested_file_streams_with_progress(
             files += sent_files;
             bytes = bytes.saturating_add(sent_bytes);
             progress.inc(sent_files as u64);
-            progress.set_transfer_status(files, bytes);
+            progress.record_completed_transfer_files(sent_files);
         }
 
         let root = root.to_path_buf();
         let connection = connection.clone();
+        let progress = progress.clone();
         tasks.spawn(async move {
             let bytes = transfer.len;
             let mut stream = connection
@@ -862,7 +863,7 @@ async fn send_requested_file_streams_with_progress(
                 .await
                 .map_err(|error| other("open file transfer stream", error))?;
             write_message(&mut stream, &WireMessage::File(transfer.clone())).await?;
-            send_file(&root, &transfer, &mut stream).await?;
+            send_file_with_progress(&root, &transfer, &mut stream, &progress).await?;
             finish_file_stream(&mut stream).await?;
             Ok((1_usize, bytes))
         });
@@ -873,7 +874,7 @@ async fn send_requested_file_streams_with_progress(
         files += sent_files;
         bytes = bytes.saturating_add(sent_bytes);
         progress.inc(sent_files as u64);
-        progress.set_transfer_status(files, bytes);
+        progress.record_completed_transfer_files(sent_files);
     }
 
     Ok((files, bytes))
@@ -894,10 +895,11 @@ pub(super) async fn join_file_task(
     }
 }
 
-pub(super) async fn send_file(
+async fn send_file_with_progress(
     root: &Path,
     file: &FileTransfer,
     send: &mut SendStream,
+    progress: &ProgressPhase,
 ) -> Result<()> {
     let path = safe_join(root, &file.path)?;
     let mut input = tokio::fs::File::open(&path)
@@ -921,6 +923,7 @@ pub(super) async fn send_file(
             .await
             .map_err(|error| other("write file chunk to QUIC stream", error))?;
         remaining = remaining.saturating_sub(read as u64);
+        progress.add_transfer_bytes(read as u64);
     }
 
     Ok(())
@@ -946,7 +949,7 @@ async fn receive_requested_files_with_progress(
             files += received_files;
             bytes = bytes.saturating_add(received_bytes);
             progress.inc(received_files as u64);
-            progress.set_transfer_status(files, bytes);
+            progress.record_completed_transfer_files(received_files);
         }
 
         let mut stream = connection
@@ -976,9 +979,10 @@ async fn receive_requested_files_with_progress(
             "receiving file"
         );
         let root = root.to_path_buf();
+        let progress = progress.clone();
         tasks.spawn(async move {
             let bytes = file.len;
-            receive_file(&root, &file, &mut stream, options).await?;
+            receive_file_with_progress(&root, &file, &mut stream, options, &progress).await?;
             Ok((1_usize, bytes))
         });
     }
@@ -988,17 +992,18 @@ async fn receive_requested_files_with_progress(
         files += received_files;
         bytes = bytes.saturating_add(received_bytes);
         progress.inc(received_files as u64);
-        progress.set_transfer_status(files, bytes);
+        progress.record_completed_transfer_files(received_files);
     }
 
     Ok((files, bytes))
 }
 
-pub(super) async fn receive_file(
+async fn receive_file_with_progress(
     root: &Path,
     file: &FileTransfer,
     recv: &mut RecvStream,
     options: TransferOptions,
+    progress: &ProgressPhase,
 ) -> Result<()> {
     let target = safe_join(root, &file.path)?;
     let Some(parent) = target.parent() else {
@@ -1038,6 +1043,7 @@ pub(super) async fn receive_file(
             .map_err(|error| io_path("write network temp file", &temp_path, error))?;
         hasher.update(&buffer[..read]);
         remaining = remaining.saturating_sub(read as u64);
+        progress.add_transfer_bytes(read as u64);
     }
     output
         .flush()

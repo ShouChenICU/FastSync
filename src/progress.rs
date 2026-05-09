@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 use indicatif::ProgressStyle;
 use tracing::{Level, Span, span};
@@ -70,6 +72,7 @@ impl SyncProgress {
             enabled: true,
             span: Some(span),
             title: Some(title),
+            stats: Arc::new(ProgressStats::new()),
         }
     }
 }
@@ -83,6 +86,7 @@ pub(crate) struct ProgressPhase {
     enabled: bool,
     span: Option<Span>,
     title: Option<String>,
+    stats: Arc<ProgressStats>,
 }
 
 impl ProgressPhase {
@@ -91,6 +95,7 @@ impl ProgressPhase {
             enabled: false,
             span: None,
             title: None,
+            stats: Arc::new(ProgressStats::new()),
         }
     }
 
@@ -161,19 +166,47 @@ impl ProgressPhase {
         ));
     }
 
-    /// 记录网络文件传输阶段已完成的文件数和数据量。
-    pub(crate) fn set_transfer_status(&self, files: usize, bytes: u64) {
+    /// 记录本地复制完成后的阶段平均传输状态。
+    ///
+    /// 本地端保留标准库复制路径，只有文件完成后才知道该文件字节数；这里基于
+    /// 已完成文件累计值估算速度，不插入 per-chunk 回调以免损失内核复制优化。
+    pub(crate) fn record_completed_transfer_file(&self, bytes: u64) {
         if !self.enabled {
             return;
         }
 
-        self.set_message(&format!(
-            "{}={}  {}={}",
-            tr_current("progress.files"),
-            files,
-            tr_current("progress.data"),
-            human_bytes(bytes)
-        ));
+        self.stats.completed_files.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .transferred_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+        self.refresh_transfer_status();
+    }
+
+    /// 记录网络传输中已完成的文件数。
+    pub(crate) fn record_completed_transfer_files(&self, files: usize) {
+        if !self.enabled {
+            return;
+        }
+
+        self.stats
+            .completed_files
+            .fetch_add(files, Ordering::Relaxed);
+        self.refresh_transfer_status();
+    }
+
+    /// 记录网络传输中的实时字节增量。
+    ///
+    /// 网络发送和接收本身已经按 chunk 流式处理，因此在成功写出或落盘后累加
+    /// 字节不会改变协议、校验或错误语义，只影响终端可观测状态。
+    pub(crate) fn add_transfer_bytes(&self, bytes: u64) {
+        if !self.enabled {
+            return;
+        }
+
+        self.stats
+            .transferred_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+        self.refresh_transfer_status();
     }
 
     /// 记录删除阶段已删除的目标端陈旧项数量。
@@ -200,6 +233,36 @@ impl ProgressPhase {
             None
         }
     }
+
+    fn refresh_transfer_status(&self) {
+        let files = self.stats.completed_files.load(Ordering::Relaxed);
+        let bytes = self.stats.transferred_bytes.load(Ordering::Relaxed);
+        self.set_message(&format!(
+            "{}={}  {}={}  {}={}",
+            tr_current("progress.files"),
+            files,
+            tr_current("progress.data"),
+            human_bytes(bytes),
+            tr_current("progress.speed"),
+            transfer_speed_text(bytes, self.stats.started.elapsed().as_millis())
+        ));
+    }
+}
+
+struct ProgressStats {
+    started: Instant,
+    completed_files: AtomicUsize,
+    transferred_bytes: AtomicU64,
+}
+
+impl ProgressStats {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            completed_files: AtomicUsize::new(0),
+            transferred_bytes: AtomicU64::new(0),
+        }
+    }
 }
 
 struct ProgressStyles {
@@ -224,9 +287,38 @@ fn spinner_style() -> ProgressStyle {
 
 fn bar_style() -> ProgressStyle {
     ProgressStyle::with_template(
-        "{spinner:.cyan} {bar:34.cyan/blue} {pos:>7}/{len:7} {wide_msg} [{elapsed_precise}]",
+        "{spinner:.cyan} {bar:34.cyan/blue} {pos:>7}/{len:7} {percent:>3}% {wide_msg} [{elapsed_precise}]",
     )
     .unwrap_or_else(|_| ProgressStyle::default_bar())
     .progress_chars("█▓░")
     .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+}
+
+fn transfer_speed_text(bytes: u64, elapsed_ms: u128) -> String {
+    let bytes_per_second = bytes_per_second(bytes, elapsed_ms);
+    format!("{}/s", human_bytes(bytes_per_second))
+}
+
+fn bytes_per_second(bytes: u64, elapsed_ms: u128) -> u64 {
+    if elapsed_ms == 0 {
+        return 0;
+    }
+
+    ((bytes as u128).saturating_mul(1_000) / elapsed_ms).min(u64::MAX as u128) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_per_second_handles_zero_elapsed() {
+        assert_eq!(bytes_per_second(1024, 0), 0);
+    }
+
+    #[test]
+    fn transfer_speed_text_uses_adaptive_units() {
+        assert_eq!(transfer_speed_text(2_048, 1_000), "2.0 KiB/s");
+        assert_eq!(transfer_speed_text(2 * 1024 * 1024, 1_000), "2.0 MiB/s");
+    }
 }

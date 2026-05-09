@@ -259,6 +259,7 @@ fn worker_loop(
                 bytes,
                 reason,
                 &mut report,
+                &progress,
             ),
             WorkerTask::SetMetadata { relative_path } => endpoints
                 .target()
@@ -324,6 +325,7 @@ fn copy_one_file(
     bytes: u64,
     reason: CopyReason,
     report: &mut WorkerReport,
+    progress: &ProgressPhase,
 ) -> Result<()> {
     if reason == CopyReason::Missing {
         endpoints
@@ -349,6 +351,7 @@ fn copy_one_file(
 
     report.copied_files += 1;
     report.bytes_copied = report.bytes_copied.saturating_add(bytes);
+    progress.record_completed_transfer_file(bytes);
     info!(path = %relative_path.display(), bytes, "{}", tr_current("log.file_copied"));
     Ok(())
 }

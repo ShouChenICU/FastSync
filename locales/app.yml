@@ -187,6 +187,9 @@ progress.operations:
 progress.data:
   en: "data"
   zh-CN: "数据"
+progress.speed:
+  en: "speed"
+  zh-CN: "速度"
 progress.files:
   en: "files"
   zh-CN: "文件"
