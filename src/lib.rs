@@ -18,6 +18,7 @@ pub mod plan;
 mod progress;
 pub mod scan;
 pub mod summary;
+mod timestamp;
 pub mod verify;
 
 use std::time::Instant;

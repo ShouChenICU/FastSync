@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 
 use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,6 +11,7 @@ use crate::error::{FastSyncError, Result};
 use crate::filter::PathFilter;
 use crate::i18n::tr_current;
 use crate::progress::{ProgressPhase, SyncProgress};
+use crate::timestamp::{TimestampPrecision, detect_timestamp_precision, time_matches_unix_parts};
 
 use super::{
     BUFFER_SIZE, HASH_REQUEST_BATCH_SIZE,
@@ -491,13 +492,14 @@ async fn send_file_requests_with_progress(
     let mut requested = Vec::new();
     let mut direct_requests = 0_usize;
     let mut hash_comparisons = Vec::new();
+    let target_timestamp_precision = detect_timestamp_precision(root);
     for file in &manifest.files {
         if !filter.allows_entry(&file.path, false) {
             progress.inc(1);
             progress.set_request_status(hash_comparisons.len(), requested.len());
             continue;
         }
-        match file_request_decision(&target_snapshot, file, strict)? {
+        match file_request_decision(&target_snapshot, file, strict, target_timestamp_precision)? {
             FileRequestDecision::Request => {
                 requested.push(file.path.clone());
                 direct_requests += 1;
@@ -654,7 +656,12 @@ pub(super) fn request_files_for_local_state_filtered(
         if !filter.allows_entry(&file.path, false) {
             continue;
         }
-        match file_request_decision(&target_snapshot, file, strict)? {
+        match file_request_decision(
+            &target_snapshot,
+            file,
+            strict,
+            TimestampPrecision::default(),
+        )? {
             FileRequestDecision::Request => requested.push(file.path.clone()),
             FileRequestDecision::Skip => {}
             FileRequestDecision::CompareHash { local_path } => {
@@ -679,6 +686,7 @@ pub(super) fn file_request_decision(
     target_snapshot: &crate::scan::Snapshot,
     file: &FileManifest,
     strict: bool,
+    timestamp_precision: TimestampPrecision,
 ) -> Result<FileRequestDecision> {
     let Some(target_entry) = target_snapshot.get(&file.path) else {
         return Ok(FileRequestDecision::Request);
@@ -688,7 +696,7 @@ pub(super) fn file_request_decision(
         return Ok(FileRequestDecision::Request);
     }
 
-    if !strict && content_metadata_matches(target_entry, &file.metadata) {
+    if !strict && content_metadata_matches(target_entry, &file.metadata, timestamp_precision) {
         Ok(FileRequestDecision::Skip)
     } else {
         Ok(FileRequestDecision::CompareHash {
@@ -700,29 +708,23 @@ pub(super) fn file_request_decision(
 pub(super) fn content_metadata_matches(
     entry: &crate::scan::FileEntry,
     metadata: &WireMetadata,
+    timestamp_precision: TimestampPrecision,
 ) -> bool {
-    metadata_time_matches(entry, metadata) && metadata_permissions_match(entry, metadata)
+    metadata_time_matches(entry, metadata, timestamp_precision)
+        && metadata_permissions_match(entry, metadata)
 }
 
 pub(super) fn metadata_time_matches(
     entry: &crate::scan::FileEntry,
     metadata: &WireMetadata,
+    timestamp_precision: TimestampPrecision,
 ) -> bool {
-    let Some(source_secs) = metadata.modified_secs else {
-        return entry.modified.is_none();
-    };
-    let Some(source_nanos) = metadata.modified_nanos else {
-        return entry.modified.is_none();
-    };
-    let Some(target_modified) = entry.modified else {
-        return false;
-    };
-    let Ok(target_duration) = target_modified.duration_since(UNIX_EPOCH) else {
-        return false;
-    };
-
-    target_duration.as_secs() as i64 == source_secs
-        && target_duration.subsec_nanos() == source_nanos
+    time_matches_unix_parts(
+        entry.modified,
+        metadata.modified_secs,
+        metadata.modified_nanos,
+        timestamp_precision,
+    )
 }
 
 pub(super) fn metadata_permissions_match(

@@ -1,11 +1,13 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use quinn::Endpoint;
 
 use crate::filter::{FilterMode, PathFilter};
 use crate::i18n::Language;
+use crate::scan::{EntryKind, FileEntry};
+use crate::timestamp::TimestampPrecision;
 
 use super::{
     ConnectConfig, MAX_MESSAGE_SIZE, NetworkCommand, PROTOCOL_VERSION, ShareConfig, ShareMode,
@@ -61,6 +63,19 @@ fn default_transfer_options() -> TransferOptions {
         preserve_times: true,
         preserve_permissions: false,
         file_concurrency: 4,
+    }
+}
+
+fn network_file_entry(path: &str, modified_nanos: u32) -> FileEntry {
+    FileEntry {
+        relative_path: PathBuf::from(path),
+        absolute_path: PathBuf::from(path),
+        kind: EntryKind::File,
+        len: 4,
+        modified: Some(UNIX_EPOCH + Duration::new(1_700_000_000, modified_nanos)),
+        readonly: false,
+        #[cfg(unix)]
+        mode: 0o100644,
     }
 }
 
@@ -423,6 +438,33 @@ fn network_utility_formats_digest_and_throughput() {
     assert_eq!(throughput_bps(2_000, 1_000), 2_000);
     assert_eq!(throughput_bps(2_000, 0), 0);
     assert_eq!(throughput_text(2_048, 1_000), "2.0 KiB/s");
+}
+
+#[test]
+fn network_metadata_time_matches_receiver_timestamp_precision() {
+    let entry = network_file_entry("same.txt", 123_000_000);
+    let metadata = WireMetadata {
+        modified_secs: Some(1_700_000_000),
+        modified_nanos: Some(123_456_789),
+        readonly: false,
+        unix_mode: Some(0o100644),
+    };
+
+    assert!(metadata_time_matches(
+        &entry,
+        &metadata,
+        TimestampPrecision::MILLISECOND
+    ));
+    assert!(!metadata_time_matches(
+        &entry,
+        &metadata,
+        TimestampPrecision::MICROSECOND
+    ));
+    assert!(content_metadata_matches(
+        &entry,
+        &metadata,
+        TimestampPrecision::MILLISECOND
+    ));
 }
 
 #[test]

@@ -6,6 +6,7 @@ use crate::error::{FastSyncError, Result};
 use crate::plan::{CopyReason, PlanOperation, SyncPlan};
 use crate::progress::ProgressPhase;
 use crate::scan::{EntryKind, FileEntry, Snapshot};
+use crate::timestamp::{TimestampPrecision, detect_timestamp_precision, times_equivalent};
 
 /// 基于源/目标快照生成同步计划。
 ///
@@ -46,6 +47,14 @@ pub(crate) fn build_plan_with_progress(
     progress: &ProgressPhase,
 ) -> Result<SyncPlan> {
     let mut plan = SyncPlan::default();
+    let target_timestamp_precision = if config.dry_run {
+        TimestampPrecision::default()
+    } else {
+        detect_timestamp_precision(endpoints.target().root())
+    };
+    // 源端扫描保持只读，因此源端精度按纳秒保守处理；目标端若精度更粗，
+    // 后续比较会自动降到目标可保存的粒度。
+    let timestamp_precision = TimestampPrecision::default().coarsest(target_timestamp_precision);
 
     for source_entry in source.entries.values() {
         match source_entry.kind {
@@ -58,7 +67,14 @@ pub(crate) fn build_plan_with_progress(
                     ensure_same_kind(source_entry, target_entry)?;
                 }
             }
-            EntryKind::File => plan_file(config, endpoints, source_entry, target, &mut plan)?,
+            EntryKind::File => plan_file(
+                config,
+                endpoints,
+                source_entry,
+                target,
+                timestamp_precision,
+                &mut plan,
+            )?,
             EntryKind::Symlink => {}
         }
         progress.inc(1);
@@ -100,6 +116,7 @@ fn plan_file(
     endpoints: &SyncEndpoints,
     source_entry: &FileEntry,
     target: &Snapshot,
+    timestamp_precision: TimestampPrecision,
     plan: &mut SyncPlan,
 ) -> Result<()> {
     let Some(target_entry) = target.get(&source_entry.relative_path) else {
@@ -113,16 +130,21 @@ fn plan_file(
 
     ensure_same_kind(source_entry, target_entry)?;
 
-    if let Some(reason) =
-        content_change_reason(config, endpoints, source_entry, target_entry, plan)?
-    {
+    if let Some(reason) = content_change_reason(
+        config,
+        endpoints,
+        source_entry,
+        target_entry,
+        timestamp_precision,
+        plan,
+    )? {
         plan.push(PlanOperation::CopyFile {
             relative_path: source_entry.relative_path.clone(),
             bytes: source_entry.len,
             reason,
         });
     } else if config.syncs_file_metadata()
-        && sync_metadata_differs(config, source_entry, target_entry)
+        && sync_metadata_differs(config, source_entry, target_entry, timestamp_precision)
     {
         plan.push(PlanOperation::SetMetadata {
             relative_path: source_entry.relative_path.clone(),
@@ -137,11 +159,12 @@ fn content_change_reason(
     endpoints: &SyncEndpoints,
     source_entry: &FileEntry,
     target_entry: &FileEntry,
+    timestamp_precision: TimestampPrecision,
     plan: &mut SyncPlan,
 ) -> Result<Option<CopyReason>> {
     match config.compare_mode {
         CompareMode::Fast => {
-            if !content_metadata_differs(source_entry, target_entry) {
+            if !content_metadata_differs(source_entry, target_entry, timestamp_precision) {
                 Ok(None)
             } else if source_entry.len != target_entry.len {
                 Ok(Some(CopyReason::MetadataChanged))
@@ -185,18 +208,36 @@ fn ensure_same_kind(source: &FileEntry, target: &FileEntry) -> Result<()> {
     })
 }
 
-fn content_metadata_differs(source: &FileEntry, target: &FileEntry) -> bool {
+fn content_metadata_differs(
+    source: &FileEntry,
+    target: &FileEntry,
+    timestamp_precision: TimestampPrecision,
+) -> bool {
     source.len != target.len
-        || source.modified != target.modified
+        || modified_time_differs(source, target, timestamp_precision)
         || permission_metadata_differs(source, target)
 }
 
-fn sync_metadata_differs(config: &SyncConfig, source: &FileEntry, target: &FileEntry) -> bool {
-    let time_differs = config.preserve_times.enabled() && source.modified != target.modified;
+fn sync_metadata_differs(
+    config: &SyncConfig,
+    source: &FileEntry,
+    target: &FileEntry,
+    timestamp_precision: TimestampPrecision,
+) -> bool {
+    let time_differs = config.preserve_times.enabled()
+        && modified_time_differs(source, target, timestamp_precision);
     let permission_differs =
         config.preserve_permissions.enabled() && permission_metadata_differs(source, target);
 
     time_differs || permission_differs
+}
+
+fn modified_time_differs(
+    source: &FileEntry,
+    target: &FileEntry,
+    timestamp_precision: TimestampPrecision,
+) -> bool {
+    !times_equivalent(source.modified, target.modified, timestamp_precision)
 }
 
 fn permission_metadata_differs(source: &FileEntry, target: &FileEntry) -> bool {
@@ -212,5 +253,60 @@ fn platform_permissions_differ(source: &FileEntry, target: &FileEntry) -> bool {
     {
         let _ = (source, target);
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::*;
+
+    fn file_entry(nanos: u32) -> FileEntry {
+        FileEntry {
+            relative_path: PathBuf::from("same.txt"),
+            absolute_path: PathBuf::from("same.txt"),
+            kind: EntryKind::File,
+            len: 8,
+            modified: Some(UNIX_EPOCH + Duration::new(1_700_000_000, nanos)),
+            readonly: false,
+            #[cfg(unix)]
+            mode: 0o100644,
+        }
+    }
+
+    #[test]
+    fn content_metadata_uses_configured_timestamp_precision() {
+        let source = file_entry(123_456_789);
+        let target = file_entry(123_000_000);
+
+        assert!(!content_metadata_differs(
+            &source,
+            &target,
+            TimestampPrecision::MILLISECOND
+        ));
+        assert!(content_metadata_differs(
+            &source,
+            &target,
+            TimestampPrecision::MICROSECOND
+        ));
+    }
+
+    #[test]
+    fn metadata_only_update_uses_configured_timestamp_precision() {
+        let source = file_entry(987_654_321);
+        let target = file_entry(987_000_000);
+
+        assert!(!modified_time_differs(
+            &source,
+            &target,
+            TimestampPrecision::MILLISECOND
+        ));
+        assert!(modified_time_differs(
+            &source,
+            &target,
+            TimestampPrecision::MICROSECOND
+        ));
     }
 }
