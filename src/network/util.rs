@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, atomic::Ordering};
+use std::time::Duration;
 
-use quinn::ClientConfig;
+use quinn::{ClientConfig, TransportConfig, VarInt};
 use rand::Rng;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 
@@ -12,12 +13,18 @@ use crate::summary::human_bytes;
 
 use super::{DEFAULT_BIND_PORT, TEMP_COUNTER, cli::validate_pairing_code};
 
+const NETWORK_MAX_IDLE_TIMEOUT_MS: u32 = 5 * 60 * 1000;
+const NETWORK_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
 pub(super) fn server_config() -> Result<quinn::ServerConfig> {
     let CertifiedKey { cert, signing_key } =
         generate_simple_self_signed(vec!["fastsync.local".to_string(), "localhost".to_string()])
             .map_err(|error| other("generate temporary QUIC certificate", error))?;
-    quinn::ServerConfig::with_single_cert(vec![cert.der().clone()], signing_key.into())
-        .map_err(|error| other("create QUIC server TLS config", error))
+    let mut config =
+        quinn::ServerConfig::with_single_cert(vec![cert.der().clone()], signing_key.into())
+            .map_err(|error| other("create QUIC server TLS config", error))?;
+    config.transport_config(network_transport_config());
+    Ok(config)
 }
 
 pub(super) fn insecure_client_config() -> ClientConfig {
@@ -29,7 +36,17 @@ pub(super) fn insecure_client_config() -> ClientConfig {
         .with_no_client_auth();
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .expect("rustls client config must contain a QUIC initial cipher suite");
-    ClientConfig::new(std::sync::Arc::new(crypto))
+    let mut config = ClientConfig::new(Arc::new(crypto));
+    config.transport_config(network_transport_config());
+    config
+}
+
+/// 构建网络会话共用的 QUIC 传输参数，避免健康连接在长时间无业务数据时被默认空闲超时关闭。
+pub(super) fn network_transport_config() -> Arc<TransportConfig> {
+    let mut transport = TransportConfig::default();
+    transport.max_idle_timeout(Some(VarInt::from_u32(NETWORK_MAX_IDLE_TIMEOUT_MS).into()));
+    transport.keep_alive_interval(Some(NETWORK_KEEP_ALIVE_INTERVAL));
+    Arc::new(transport)
 }
 
 pub(super) async fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr> {

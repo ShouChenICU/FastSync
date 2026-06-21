@@ -426,6 +426,25 @@ fn network_utility_formats_digest_and_throughput() {
 }
 
 #[test]
+fn network_transport_config_extends_idle_timeout_and_enables_keepalive() {
+    let config = network_transport_config();
+    let debug = format!("{config:?}");
+
+    assert!(debug.contains("max_idle_timeout: Some(300000)"), "{debug}");
+    assert!(debug.contains("keep_alive_interval: Some(10s)"), "{debug}");
+}
+
+#[test]
+fn server_config_uses_network_transport_config() -> crate::error::Result<()> {
+    let config = server_config()?;
+    let debug = format!("{:?}", config.transport);
+
+    assert!(debug.contains("max_idle_timeout: Some(300000)"), "{debug}");
+    assert!(debug.contains("keep_alive_interval: Some(10s)"), "{debug}");
+    Ok(())
+}
+
+#[test]
 fn network_unique_temp_path_stays_in_parent() -> std::result::Result<(), Box<dyn std::error::Error>>
 {
     let parent = tempfile::tempdir()?;
