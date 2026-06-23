@@ -210,6 +210,6 @@ jobs:
           version: ${{ needs.prepare.outputs.tag }}
           installers-regex: 'pc-windows-msvc\.exe$'
           max-versions-to-keep: 7
-          release-tag: "v${{ needs.prepare.outputs.tag }}"
+          release-tag: "${{ needs.prepare.outputs.tag }}"
           fork-user: ShouChenICU
           token: ${{ secrets.WINGET_TOKEN }}
